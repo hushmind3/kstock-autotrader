@@ -1,0 +1,82 @@
+services:
+  trading-engine:
+    build:
+      context: .
+      target: engine
+    restart: unless-stopped
+    init: true
+    environment:
+      NODE_ENV: production
+      ENGINE_HOST: 0.0.0.0
+      ENGINE_PORT: 3210
+      KSTOCK_DATA_DIR: /var/lib/kstock
+      KSTOCK_DB_PATH: /var/lib/kstock/kstock.sqlite3
+      KSTOCK_ADMIN_TOKEN: ${KSTOCK_ADMIN_TOKEN:?KSTOCK_ADMIN_TOKEN is required}
+      KSTOCK_MASTER_KEY: ${KSTOCK_MASTER_KEY:?KSTOCK_MASTER_KEY is required}
+      KSTOCK_MARKET_HOLIDAYS: ${KSTOCK_MARKET_HOLIDAYS:-}
+      KIWOOM_PAPER_APP_KEY: ${KIWOOM_PAPER_APP_KEY:-}
+      KIWOOM_PAPER_APP_SECRET: ${KIWOOM_PAPER_APP_SECRET:-}
+      KIWOOM_PAPER_ACCOUNT_ID: ${KIWOOM_PAPER_ACCOUNT_ID:-}
+      KIWOOM_QUOTE_BATCH_SIZE: ${KIWOOM_QUOTE_BATCH_SIZE:-1}
+      KIWOOM_LIVE_APP_KEY: ${KIWOOM_LIVE_APP_KEY:-}
+      KIWOOM_LIVE_APP_SECRET: ${KIWOOM_LIVE_APP_SECRET:-}
+      KIWOOM_LIVE_ACCOUNT_ID: ${KIWOOM_LIVE_ACCOUNT_ID:-}
+      KIS_PAPER_APP_KEY: ${KIS_PAPER_APP_KEY:-}
+      KIS_PAPER_APP_SECRET: ${KIS_PAPER_APP_SECRET:-}
+      KIS_PAPER_ACCOUNT_ID: ${KIS_PAPER_ACCOUNT_ID:-}
+      KIS_PAPER_ACCOUNT_PRODUCT_CODE: ${KIS_PAPER_ACCOUNT_PRODUCT_CODE:-01}
+      KIS_PAPER_HTS_ID: ${KIS_PAPER_HTS_ID:-}
+      KIS_LIVE_APP_KEY: ${KIS_LIVE_APP_KEY:-}
+      KIS_LIVE_APP_SECRET: ${KIS_LIVE_APP_SECRET:-}
+      KIS_LIVE_ACCOUNT_ID: ${KIS_LIVE_ACCOUNT_ID:-}
+      KIS_LIVE_ACCOUNT_PRODUCT_CODE: ${KIS_LIVE_ACCOUNT_PRODUCT_CODE:-01}
+      KIS_LIVE_HTS_ID: ${KIS_LIVE_HTS_ID:-}
+      KIS_DERIVATIVES_PAPER_APP_KEY: ${KIS_DERIVATIVES_PAPER_APP_KEY:-}
+      KIS_DERIVATIVES_PAPER_APP_SECRET: ${KIS_DERIVATIVES_PAPER_APP_SECRET:-}
+      KIS_DERIVATIVES_PAPER_ACCOUNT_ID: ${KIS_DERIVATIVES_PAPER_ACCOUNT_ID:-}
+      KIS_DERIVATIVES_PAPER_ACCOUNT_PRODUCT_CODE: ${KIS_DERIVATIVES_PAPER_ACCOUNT_PRODUCT_CODE:-03}
+      KIS_DERIVATIVES_PAPER_HTS_ID: ${KIS_DERIVATIVES_PAPER_HTS_ID:-}
+      KIS_DERIVATIVES_LIVE_APP_KEY: ${KIS_DERIVATIVES_LIVE_APP_KEY:-}
+      KIS_DERIVATIVES_LIVE_APP_SECRET: ${KIS_DERIVATIVES_LIVE_APP_SECRET:-}
+      KIS_DERIVATIVES_LIVE_ACCOUNT_ID: ${KIS_DERIVATIVES_LIVE_ACCOUNT_ID:-}
+      KIS_DERIVATIVES_LIVE_ACCOUNT_PRODUCT_CODE: ${KIS_DERIVATIVES_LIVE_ACCOUNT_PRODUCT_CODE:-03}
+      KIS_DERIVATIVES_LIVE_HTS_ID: ${KIS_DERIVATIVES_LIVE_HTS_ID:-}
+      KIS_USE_HASHKEY: ${KIS_USE_HASHKEY:-false}
+    volumes:
+      - kstock-data:/var/lib/kstock
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3210/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 30s
+
+  web:
+    build:
+      context: .
+      target: web
+    restart: unless-stopped
+    init: true
+    depends_on:
+      trading-engine:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      WEB_HOST: 0.0.0.0
+      WEB_PORT: 3100
+      ENGINE_URL: http://trading-engine:3210
+      KSTOCK_ADMIN_TOKEN: ${KSTOCK_ADMIN_TOKEN:?KSTOCK_ADMIN_TOKEN is required}
+      KSTOCK_REQUIRE_WEB_AUTH: "true"
+      KSTOCK_WEB_USERNAME: ${KSTOCK_WEB_USERNAME:-admin}
+      KSTOCK_WEB_PASSWORD: ${KSTOCK_WEB_PASSWORD:?KSTOCK_WEB_PASSWORD is required}
+    ports:
+      - "${WEB_PORT:-3100}:3100"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3100/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 30s
+
+volumes:
+  kstock-data:

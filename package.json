@@ -1,0 +1,36 @@
+{
+  "name": "kstock-autotrader",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "workspaces": [
+    "web",
+    "shared",
+    "database",
+    "strategies",
+    "broker-adapters/*",
+    "trading-engine"
+  ],
+  "scripts": {
+    "app": "node scripts/desktop-launcher.mjs",
+    "dev": "concurrently --kill-others --names ENGINE,WEB --prefix-colors cyan,green \"npm run dev -w @kstock/trading-engine\" \"npm run dev -w @kstock/web\"",
+    "dev:web": "npm run dev -w @kstock/web",
+    "dev:engine": "npm run dev -w @kstock/trading-engine",
+    "start:engine": "npm run start -w @kstock/trading-engine",
+    "start:web": "npm run start -w @kstock/web",
+    "setup": "npm run setup -w @kstock/trading-engine",
+    "build": "npm run build -w @kstock/trading-engine && npm run build -w @kstock/web && node scripts/desktop-launcher.mjs --mark-build",
+    "start": "concurrently --kill-others --names ENGINE,WEB --prefix-colors cyan,green \"npm run start -w @kstock/trading-engine\" \"npm run start -w @kstock/web\"",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "concurrently": "10.0.5",
+    "typescript": "7.0.2",
+    "vitest": "4.1.11"
+  }
+}
