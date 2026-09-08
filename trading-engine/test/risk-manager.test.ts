@@ -435,4 +435,56 @@ describe("RiskManager", () => {
       ]));
     }
   });
+
+  it("blocks only new buys while the market-wide trend is weak", () => {
+    const settings = createDefaultSettings();
+    settings.emergencyHalt = false;
+    settings.globalAutoTradingEnabled = true;
+    settings.newBuysPaused = false;
+    settings.brokers.kiwoom.enabled = true;
+    settings.brokers.kiwoom.autoTradingEnabled = true;
+    settings.brokers.kiwoom.newBuysPaused = false;
+    const base = {
+      appSettings: settings,
+      brokerSettings: settings.brokers.kiwoom,
+      health: connected,
+      symbol: quote.symbol,
+      quote,
+      positions: [] as BrokerPosition[],
+      openOrders: [] as BrokerOrder[],
+      dailyInvestedAmount: 0,
+      dailyTotalPnl: 0,
+      reservedAmount: 0,
+      availableCash: 1_000_000,
+      instrumentBuyAllowed: true,
+      instrumentRestrictionCodes: [] as string[],
+      marketRegimeBuyAllowed: false,
+      marketRegimeReasonCode: "MARKET_REGIME_INTRADAY_BREADTH_WEAK",
+      marketOpen: true,
+      now: new Date("2026-08-31T01:00:01.000Z"),
+    };
+
+    const buy = new RiskManager().check({ ...base, side: "buy" });
+    expect(buy.allowed).toBe(false);
+    if (!buy.allowed) {
+      expect(buy.reasonCodes).toContain("MARKET_REGIME_INTRADAY_BREADTH_WEAK");
+    }
+
+    const sell = new RiskManager().check({
+      ...base,
+      side: "sell",
+      positions: [{
+        symbol: quote.symbol,
+        quantity: 2,
+        availableQuantity: 2,
+        averagePrice: 60_000,
+        currentPrice: quote.price,
+        marketValue: quote.price * 2,
+        unrealizedPnl: 20_000,
+        unrealizedPnlBps: 1_666,
+      }],
+    });
+    expect(sell.allowed).toBe(true);
+    if (sell.allowed) expect(sell.request.side).toBe("sell");
+  });
 });

@@ -24,6 +24,8 @@ export interface RiskCheckInput {
   availableCash: number | null;
   instrumentBuyAllowed: boolean;
   instrumentRestrictionCodes: string[];
+  marketRegimeBuyAllowed?: boolean;
+  marketRegimeReasonCode?: string;
   marketOpen: boolean;
   now?: Date;
 }
@@ -150,6 +152,9 @@ export class RiskManager {
 
     if (input.appSettings.newBuysPaused || input.brokerSettings.newBuysPaused) {
       failures.push("NEW_BUYS_PAUSED");
+    }
+    if (input.marketRegimeBuyAllowed === false) {
+      failures.push(input.marketRegimeReasonCode ?? "MARKET_REGIME_BLOCKED");
     }
     if (!input.instrumentBuyAllowed) {
       failures.push("INSTRUMENT_RESTRICTED");

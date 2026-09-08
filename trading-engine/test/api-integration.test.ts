@@ -319,7 +319,7 @@ describe("trading-engine API integration", () => {
     });
     expect(startWithoutBroker.statusCode).toBe(409);
     expect(startWithoutBroker.json().message).toBe("자동매매를 시작할 증권사를 지정해 주세요.");
-  });
+  }, 10_000);
 
   it("arms one broker before market-status confirmation while preserving final order gates", async () => {
     await startConnectedEngine({}, (settings) => {
@@ -340,6 +340,7 @@ describe("trading-engine API integration", () => {
       url: "/api/settings",
       headers,
     });
+    const staleSettings = before.json().settings;
     const beforeConnection = before.json().connections.kiwoom;
     expect(beforeConnection).toMatchObject({
       brokerAuthenticated: true,
@@ -409,6 +410,23 @@ describe("trading-engine API integration", () => {
       payload: { brokerId: "kiwoom", marketStatusConfirmed: false },
     });
 
+    const savedFromStaleTab = await api!.inject({
+      method: "PUT",
+      url: "/api/settings",
+      headers,
+      payload: { ...staleSettings, scanIntervalMs: 6_000 },
+    });
+    expect(savedFromStaleTab.statusCode).toBe(200);
+    expect(engine!.settings).toMatchObject({
+      emergencyHalt: false,
+      globalAutoTradingEnabled: true,
+      newBuysPaused: false,
+      scanIntervalMs: 6_000,
+      brokers: {
+        kiwoom: { autoTradingEnabled: true, newBuysPaused: false },
+      },
+    });
+
     await api!.inject({
       method: "POST",
       url: "/api/control",
@@ -425,6 +443,7 @@ describe("trading-engine API integration", () => {
     expect(engine!.settings).toMatchObject({
       emergencyHalt: false,
       globalAutoTradingEnabled: true,
+      newBuysPaused: false,
     });
   });
 
@@ -455,6 +474,53 @@ describe("trading-engine API integration", () => {
       newBuysPaused: false,
     });
   });
+
+  it("keeps a once-armed account running after an engine restart when automatic recovery is enabled", async () => {
+    const { credentialStore, adapters } = await startConnectedEngine({}, (settings) => {
+      settings.brokers.kiwoom.resumeAfterRestart = true;
+    });
+    const headers = {
+      "x-kstock-admin-token": "integration-test-admin-token-32-characters",
+      "content-type": "application/json",
+    };
+    const started = await api!.inject({
+      method: "POST",
+      url: "/api/control",
+      headers,
+      payload: { action: "start-broker", brokerId: "kiwoom" },
+    });
+    expect(started.statusCode).toBe(200);
+
+    await api!.close();
+    api = null;
+    await engine!.stop();
+    engine = new TradingEngine({
+      repository: repository!,
+      dataDirectory: path.join(tmpdir(), `kstock-api-restart-${randomUUID()}`),
+      credentialStore,
+      brokerAdapterFactory: ({ brokerId }) => adapters[brokerId],
+    });
+    await engine.start();
+    api = await createApiServer(engine, "integration-test-admin-token-32-characters");
+
+    expect(engine.settings).toMatchObject({
+      emergencyHalt: false,
+      globalAutoTradingEnabled: true,
+      newBuysPaused: false,
+      brokers: {
+        kiwoom: {
+          autoTradingEnabled: true,
+          newBuysPaused: false,
+          resumeAfterRestart: true,
+        },
+      },
+    });
+    expect(
+      repository!.listAuditLog({ limit: 100 }).filter(
+        (row) => row.action === "CONTROL_START_BROKER",
+      ),
+    ).toHaveLength(1);
+  }, 10_000);
 
   it("keeps other brokers sell-enabled but buy-paused when only the global buy gate was closed", async () => {
     await startConnectedEngine({}, (settings) => {

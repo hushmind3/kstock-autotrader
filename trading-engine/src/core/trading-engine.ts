@@ -478,6 +478,19 @@ export class TradingEngine {
     this.#marketData = new MarketDataService(this.#repository, {
       getRuntimes: () => this.marketRuntimes(),
       getQuoteSweepIntervalMs: () => this.#settings.quoteSweepIntervalMs,
+      getMarketRegimeSettings: () => this.#settings.marketRegime,
+      getLatestCompletedTradingDate: () =>
+        this.#marketClock.previousTradingDate(koreanTradingDate()),
+      onMarketRegimeChange: (current, previous) => {
+        if (!previous.buyAllowed && current.buyAllowed) {
+          // A BUY signal first seen while the market-wide gate was closed must
+          // be evaluated again as soon as the gate reopens. Otherwise the
+          // edge-trigger cache would keep a valid signal stuck in waiting
+          // until it changed to HOLD and back to BUY.
+          this.#lastActions.clear();
+          this.#lastEvaluatedAt.clear();
+        }
+      },
       getPrioritySymbols: (scope) => this.prioritySymbols(scope),
       isMarketOpen: (adapter) => this.isRuntimeOrderWindowOpen(adapter),
       onQuote: (adapter, quote) => this.evaluateQuote(adapter, quote),
@@ -591,12 +604,25 @@ export class TradingEngine {
     const parsed = AppSettingsSchema.parse(input);
     for (const brokerId of BROKER_IDS) {
       const broker = parsed.brokers[brokerId];
+      const current = this.#settings.brokers[brokerId];
       const strategy = this.#strategyRegistry.get(broker.strategyId);
       broker.strategyConfig = StrategyConfigSchema.parse(
         strategy.validateConfig(broker.strategyConfig),
       );
+      // Account arming is an audited runtime control, not an ordinary form
+      // value. A settings tab left open in the browser must never reapply a
+      // stale stop/start value when the user later saves strategy numbers.
+      if (!broker.enabled || broker.environment !== current.environment) {
+        broker.autoTradingEnabled = false;
+        broker.newBuysPaused = true;
+      } else {
+        broker.autoTradingEnabled = current.autoTradingEnabled;
+        broker.newBuysPaused = current.newBuysPaused;
+      }
     }
+    parsed.globalAutoTradingEnabled = this.#settings.globalAutoTradingEnabled;
     parsed.emergencyHalt = this.#settings.emergencyHalt;
+    parsed.newBuysPaused = this.#settings.newBuysPaused;
     this.#settings = parsed;
     this.#repository.setAppSettings(parsed);
     await this.enqueueLifecycle(() => this.rebuildRuntimes());
@@ -1064,6 +1090,7 @@ export class TradingEngine {
       }
       this.#settings.emergencyHalt = false;
       this.#settings.globalAutoTradingEnabled = true;
+      this.#settings.newBuysPaused = false;
       // Conditions observed while halted must be eligible for a fresh risk
       // check on the next quote after an explicit resume.
       this.#lastActions.clear();
@@ -1306,6 +1333,7 @@ export class TradingEngine {
         sessions: this.#marketSession.sessions,
         session: this.#marketSession,
         dailyBarBackfill: { completed: marketMetrics.backfillCompleted, total: marketMetrics.backfillTotal },
+        regime: marketMetrics.marketRegime,
       },
       pnl: { realized, unrealized, total: realized + unrealized },
       brokerMetrics,
@@ -2124,6 +2152,7 @@ export class TradingEngine {
               buyAllowed: false,
               restrictionCodes: [] as string[],
             };
+        const marketRegime = this.#marketData.metrics.marketRegime;
         const result = await this.#orderDispatcher.dispatch({
           adapter: runtime.adapter,
           appSettings: this.#settings,
@@ -2140,6 +2169,8 @@ export class TradingEngine {
             availableCash: balance?.availableCash ?? null,
             instrumentBuyAllowed: instrumentSafety.buyAllowed,
             instrumentRestrictionCodes: instrumentSafety.restrictionCodes,
+            marketRegimeBuyAllowed: marketRegime.buyAllowed,
+            marketRegimeReasonCode: `MARKET_REGIME_${marketRegime.reasonCode}`,
             marketOpen: this.isRuntimeOrderWindowOpen(runtime.adapter),
           },
         });
@@ -2455,7 +2486,10 @@ export class TradingEngine {
     // KIS applies the ceiling to one app key, not to each adapter instance.
     // Keep cash and derivatives on one serialized queue with headroom for the
     // broker's internal ledger limits and for a manual account refresh.
-    const requestsPerSecond = environment === "live" ? 8 : 0.75;
+    const configuredLiveRate = envInteger("KIS_LIVE_REQUESTS_PER_SECOND");
+    const requestsPerSecond = environment === "live"
+      ? Math.min(configuredLiveRate ?? 5, 18)
+      : 0.75;
     // KIS account-ledger TRs reject calls admitted on an exact one-second
     // boundary on some live accounts. Two-second spacing leaves deterministic
     // headroom while still completing both cash and derivatives recovery well

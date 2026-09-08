@@ -56,6 +56,23 @@ export interface DashboardResponse {
       checkedAt: string;
     };
     dailyBarBackfill: { completed: number; total: number };
+    regime: {
+      enabled: boolean;
+      status: "DISABLED" | "WAITING_FOR_DATA" | "NORMAL" | "WEAK";
+      buyAllowed: boolean;
+      reasonCode:
+        | "FILTER_DISABLED"
+        | "DAILY_BREADTH_NOT_READY"
+        | "DAILY_BREADTH_WEAK"
+        | "INTRADAY_BREADTH_NOT_READY"
+        | "INTRADAY_BREADTH_WEAK"
+        | "MARKET_HEALTHY";
+      dailySampleCount: number;
+      dailyAboveLongMaBps: number | null;
+      intradaySampleCount: number;
+      intradayAdvancingBps: number | null;
+      checkedAt: string;
+    };
   };
   pnl: {
     realized: number;
@@ -192,6 +209,13 @@ export interface SettingsResponse {
     staleQuoteMs: number;
     scanIntervalMs: number;
     quoteSweepIntervalMs: number;
+    marketRegime: {
+      enabled: boolean;
+      longPeriod: number;
+      minimumAboveLongMaBps: number;
+      minimumIntradayAdvancingBps: number;
+      minimumSampleSize: number;
+    };
     brokers: Record<BrokerId, BrokerSettings>;
   };
   credentials: Record<BrokerId, Record<"live" | "paper", CredentialStatus>>;

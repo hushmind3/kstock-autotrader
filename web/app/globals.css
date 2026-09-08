@@ -130,6 +130,7 @@ h2 { margin: 0; font-size: 18px; letter-spacing: -.025em; }
 .status { border-radius: 999px; padding: 5px 8px; font-size: 9px; font-weight: 900; letter-spacing: .08em; }
 .status.off { background: rgba(143,155,168,.1); color: var(--muted); }
 .status.on { background: var(--accent-soft); color: var(--accent); }
+.status.paused { background: rgba(243,189,88,.11); color: var(--warning); }
 .mode-strip { display: flex; align-items: center; justify-content: space-between; margin-top: 15px; border-radius: 7px; padding: 8px 10px; font-size: 11px; font-weight: 800; }
 .mode-strip.paper { color: var(--blue); background: rgba(105,170,248,.08); }
 .mode-strip.live { color: var(--danger); background: var(--danger-soft); }
@@ -139,6 +140,8 @@ dl div { display: flex; justify-content: space-between; padding: 8px 0; border-b
 dt { color: var(--muted); } dd { margin: 0; }
 .inline-error { margin: 9px 0 0; color: var(--danger); font-size: 10px; }
 .inline-status { margin: 9px 0 0; color: var(--warning); font-size: 10px; line-height: 1.45; }
+.broker-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.broker-actions > button { flex: 1 1 210px; }
 .empty-broker { display: grid; min-height: 260px; place-items: center; }
 .text-link { color: var(--accent); font-size: 11px; font-weight: 750; }
 .split-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-bottom: 10px; }

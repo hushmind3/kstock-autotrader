@@ -241,6 +241,22 @@ export class MarketClock {
     }
   }
 
+  previousTradingDate(tradingDate: string): string {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(tradingDate)) {
+      throw new TypeError("tradingDate must use YYYY-MM-DD format");
+    }
+    let candidate = new Date(`${tradingDate}T12:00:00+09:00`);
+    if (!Number.isFinite(candidate.getTime())) {
+      throw new TypeError("tradingDate is invalid");
+    }
+    for (let offset = 0; offset < 370; offset += 1) {
+      candidate = plusDays(candidate, -1);
+      const date = ymd(koreanParts(candidate));
+      if (this.#isTradingDate(date)) return date;
+    }
+    throw new Error("No preceding trading date was found in the calendar window");
+  }
+
   applyBrokerStatus(
     state: Exclude<MarketSessionState, "HOLIDAY">,
     observedAt: string,

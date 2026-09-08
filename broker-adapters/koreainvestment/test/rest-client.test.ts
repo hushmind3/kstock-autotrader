@@ -107,4 +107,41 @@ describe("KisRestClient authentication recovery", () => {
     expect(freshQueries).toBe(2);
     expect(tokenStore.token?.token).toBe("fresh-token");
   });
+
+  it("holds the shared request queue through the next quota window after EGW00201", async () => {
+    const tokenStore = new MutableTokenStore();
+    const limiter = new KisRequestLimiter(100_000, 100_000, 100_000);
+    const defer = vi.spyOn(limiter, "defer");
+    const client = new KisRestClient({
+      baseUrl: "https://openapi.koreainvestment.com:9443",
+      credentials: {
+        appKey: "app-key",
+        appSecret: "app-secret",
+        accountId: "12345678",
+        accountProductCode: "01",
+      },
+      scope: {
+        brokerId: "koreainvestment",
+        environment: "live",
+        accountId: "12345678-01",
+      },
+      tokenStore,
+      fetchImplementation: vi.fn(async () => Response.json({
+        rt_cd: "1",
+        msg_cd: "EGW00201",
+        msg1: "초당 거래건수를 초과하였습니다.",
+      })) as typeof fetch,
+      timeoutMs: 1_000,
+      limiter,
+      useHashkey: false,
+    });
+
+    await expect(client.request({
+      path: "/uapi/domestic-stock/v1/quotations/inquire-price",
+      method: "GET",
+      trId: "FHKST01010100",
+      kind: "query",
+    })).rejects.toMatchObject({ code: "EGW00201" });
+    expect(defer).toHaveBeenCalledWith("query", 61_000, true);
+  });
 });

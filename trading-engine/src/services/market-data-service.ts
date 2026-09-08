@@ -1,13 +1,19 @@
 import {
+  MarketRegimeSettingsSchema,
   readInstrumentSafetyMetadata,
   koreanTradingDate,
   toIsoDateTime,
   type AccountScope,
   type BrokerAdapter,
   type Instrument,
+  type MarketRegimeSettings,
   type Quote,
 } from "@kstock/shared";
 import { TradingRepository } from "@kstock/database";
+import {
+  evaluateMarketRegime,
+  type MarketRegimeSnapshot,
+} from "../core/market-regime.js";
 
 export interface MarketRuntimeView {
   adapter: BrokerAdapter;
@@ -28,11 +34,18 @@ export interface MarketDataMetrics {
   lastUniverseSyncAt: string | null;
   backfillCompleted: number;
   backfillTotal: number;
+  marketRegime: MarketRegimeSnapshot;
 }
 
 export interface MarketDataServiceOptions {
   getRuntimes: () => MarketRuntimeView[];
   getQuoteSweepIntervalMs: () => number;
+  getMarketRegimeSettings?: () => MarketRegimeSettings;
+  getLatestCompletedTradingDate?: () => string;
+  onMarketRegimeChange?: (
+    current: MarketRegimeSnapshot,
+    previous: MarketRegimeSnapshot,
+  ) => void;
   getPrioritySymbols: (scope: AccountScope) => string[];
   isMarketOpen: (adapter: BrokerAdapter) => boolean;
   onQuote: (adapter: BrokerAdapter, quote: Quote) => Promise<void>;
@@ -71,6 +84,11 @@ export function previousWeekdayDate(tradingDate: string): string {
 export class MarketDataService {
   #controller: AbortController | null = null;
   readonly #dailyBarsReady = new Set<string>();
+  readonly #intradayBreadth = new Map<string, { advancing: boolean; observedAt: number }>();
+  #intradayTradingDate = koreanTradingDate();
+  #lastIntradayPrunedAt = 0;
+  #dailyRegimeSampleCount = 0;
+  #dailyAboveLongMaCount = 0;
   #metrics: MarketDataMetrics = {
     universeCount: 0,
     buyEligibleCount: 0,
@@ -85,6 +103,15 @@ export class MarketDataService {
     lastUniverseSyncAt: null,
     backfillCompleted: 0,
     backfillTotal: 0,
+    marketRegime: evaluateMarketRegime({
+      settings: MarketRegimeSettingsSchema.parse({}),
+      dailySampleCount: 0,
+      dailyAboveLongMaCount: 0,
+      intradaySampleCount: 0,
+      intradayAdvancingCount: 0,
+      requireIntradayEvidence: false,
+      checkedAt: toIsoDateTime(),
+    }),
   };
 
   constructor(
@@ -96,10 +123,17 @@ export class MarketDataService {
       "last-universe-sync-at",
     );
     this.updateInstrumentMetrics(this.repository.listInstruments(true));
+    this.refreshDailyMarketRegime();
+    this.updateMarketRegimeMetric();
   }
 
   get metrics(): MarketDataMetrics {
-    return { ...this.#metrics };
+    this.updateMarketRegimeMetric();
+    return {
+      ...this.#metrics,
+      restrictionCounts: { ...this.#metrics.restrictionCounts },
+      marketRegime: { ...this.#metrics.marketRegime },
+    };
   }
 
   isDailyBarsReady(symbol: string): boolean {
@@ -110,6 +144,9 @@ export class MarketDataService {
     await this.stop();
     this.#controller = new AbortController();
     this.#dailyBarsReady.clear();
+    this.resetIntradayMarketRegimeIfNeeded();
+    this.refreshDailyMarketRegime();
+    this.updateMarketRegimeMetric();
     const runtimes = this.options.getRuntimes();
     if (runtimes.length === 0) return;
 
@@ -137,9 +174,7 @@ export class MarketDataService {
     );
     const backfillRuntime: MarketRuntimeView = {
       adapter: provider.adapter,
-      requiredDailyBars: Math.max(
-        ...runtimes.map((runtime) => runtime.requiredDailyBars),
-      ),
+      requiredDailyBars: Math.max(...runtimes.map((runtime) => runtime.requiredDailyBars)),
     };
     void this.backfillDailyBars(backfillRuntime, signal);
     for (const runtime of runtimes) void this.quoteSweepLoop(runtime, signal);
@@ -156,6 +191,7 @@ export class MarketDataService {
 
   async handleRealtimeQuote(adapter: BrokerAdapter, quote: Quote): Promise<void> {
     this.repository.upsertLatestQuote(quote);
+    this.observeMarketRegimeQuote(quote);
     await this.options.onQuote(adapter, quote);
   }
 
@@ -191,7 +227,8 @@ export class MarketDataService {
             runtime.adapter.capabilities.maxQuoteSubscriptions,
           ),
         0,
-      );
+    );
+    this.updateMarketRegimeMetric();
     await this.scanStoredQuotes(signal);
   }
 
@@ -212,6 +249,14 @@ export class MarketDataService {
     this.#metrics.lastUniverseSyncAt = now;
     const active = fresh.filter((instrument) => instrument.active);
     this.updateInstrumentMetrics(active);
+    const eligibleSymbols = new Set(
+      active
+        .filter((instrument) => readInstrumentSafetyMetadata(instrument).buyAllowed)
+        .map((instrument) => instrument.symbol),
+    );
+    for (const symbol of this.#intradayBreadth.keys()) {
+      if (!eligibleSymbols.has(symbol)) this.#intradayBreadth.delete(symbol);
+    }
     this.#metrics.rotatingScanCount = active.length;
   }
 
@@ -236,33 +281,52 @@ export class MarketDataService {
 
   private async backfillDailyBars(runtime: MarketRuntimeView, signal: AbortSignal): Promise<void> {
     const instruments = this.repository.listInstruments(true);
+    const requiredHistorySymbols = new Set(
+      this.options.getRuntimes().flatMap((candidateRuntime) =>
+        this.options.getPrioritySymbols(candidateRuntime.adapter.scope)),
+    );
     const tradingDate = koreanTradingDate();
-    const normallyExpectedLatestDate = previousWeekdayDate(tradingDate);
+    const expectedLatestDate = this.latestCompletedTradingDate();
     const stateKey = `daily-bar-backfill:${runtime.adapter.scope.brokerId}`;
-    const lastCompletedDate = this.repository.getRuntimeState<string>(null, stateKey);
+    const regimeSettings = this.marketRegimeSettings();
+    const requestedDailyBars = Math.max(
+      runtime.requiredDailyBars,
+      regimeSettings.enabled ? regimeSettings.longPeriod : 0,
+    );
     let completedWithoutError = true;
     this.#metrics.backfillTotal = instruments.length;
     this.#metrics.backfillCompleted = 0;
     for (const instrument of instruments) {
       if (signal.aborted) return;
       try {
+        if (
+          !readInstrumentSafetyMetadata(instrument).buyAllowed &&
+          !requiredHistorySymbols.has(instrument.symbol)
+        ) {
+          // Structured products and broker-designated risk instruments are
+          // never eligible for a new cash-equity purchase. Some of those
+          // symbols are not accepted by the ordinary equity candle endpoint,
+          // so avoid needless requests and protocol-error floods. A restricted
+          // symbol that is already held or has an open order remains in the
+          // priority set and still receives history for exit monitoring.
+          this.#dailyBarsReady.delete(instrument.symbol);
+          continue;
+        }
         const existing = this.repository.listDailyBars(instrument.symbol, {
-          limit: runtime.requiredDailyBars + 1,
+          limit: requestedDailyBars + 1,
         });
         const completedExisting = existing.filter(
           (bar) => bar.tradingDate < tradingDate,
         );
         const latestExistingDate = completedExisting.at(-1)?.tradingDate;
-        const needsDailyRefresh =
-          lastCompletedDate !== tradingDate &&
-          latestExistingDate !== normallyExpectedLatestDate;
+        const needsDailyRefresh = latestExistingDate !== expectedLatestDate;
         if (
           needsDailyRefresh ||
-          completedExisting.length < runtime.requiredDailyBars
+          completedExisting.length < requestedDailyBars
         ) {
           const bars = await runtime.adapter.fetchDailyBars(
             instrument.symbol,
-            runtime.requiredDailyBars + 1,
+            requestedDailyBars + 1,
           );
           if (bars.length === 0) {
             throw new Error(`Broker returned no daily bars for ${instrument.symbol}`);
@@ -274,7 +338,10 @@ export class MarketDataService {
             limit: runtime.requiredDailyBars + 1,
           })
           .filter((bar) => bar.tradingDate < tradingDate);
-        if (verified.length < runtime.requiredDailyBars) {
+        if (
+          verified.length < runtime.requiredDailyBars ||
+          verified.at(-1)?.tradingDate !== expectedLatestDate
+        ) {
           // Newly listed shares and products naturally have less history than
           // a strategy requires. They are ineligible until enough completed
           // sessions accumulate; this is expected market data, not an engine
@@ -294,6 +361,8 @@ export class MarketDataService {
     if (!signal.aborted && completedWithoutError) {
       this.repository.setRuntimeState(null, stateKey, tradingDate);
     }
+    this.refreshDailyMarketRegime();
+    this.updateMarketRegimeMetric();
     // Candidate discovery is independent from automatic ordering. When the
     // engine starts while the exchange is closed, rebuild the current screen
     // from the latest saved broker quotes after daily bars are ready. This
@@ -400,6 +469,7 @@ export class MarketDataService {
             : await Promise.all(symbols.map((symbol) => runtime.adapter.fetchQuote(symbol)));
           for (const quote of quotes) {
             this.repository.upsertLatestQuote(quote);
+            this.observeMarketRegimeQuote(quote);
             await this.options.onQuote(runtime.adapter, quote);
             if (latestQuoteAt === null || quote.receivedAt > latestQuoteAt) {
               latestQuoteAt = quote.receivedAt;
@@ -422,6 +492,114 @@ export class MarketDataService {
         }
       }
       await delay(this.options.getQuoteSweepIntervalMs(), signal);
+    }
+  }
+
+  private marketRegimeSettings(): MarketRegimeSettings {
+    return this.options.getMarketRegimeSettings?.() ?? MarketRegimeSettingsSchema.parse({});
+  }
+
+  private latestCompletedTradingDate(): string {
+    return this.options.getLatestCompletedTradingDate?.()
+      ?? previousWeekdayDate(koreanTradingDate());
+  }
+
+  private intradayQuoteMaxAgeMs(): number {
+    return Math.max(
+      5 * 60_000,
+      Math.min(15 * 60_000, this.options.getQuoteSweepIntervalMs() * 3),
+    );
+  }
+
+  private pruneExpiredIntradayBreadth(now = Date.now(), force = false): void {
+    if (!force && now - this.#lastIntradayPrunedAt < 30_000) return;
+    const cutoff = now - this.intradayQuoteMaxAgeMs();
+    for (const [symbol, observation] of this.#intradayBreadth) {
+      if (observation.observedAt < cutoff) this.#intradayBreadth.delete(symbol);
+    }
+    this.#lastIntradayPrunedAt = now;
+  }
+
+  private resetIntradayMarketRegimeIfNeeded(): void {
+    const tradingDate = koreanTradingDate();
+    if (tradingDate === this.#intradayTradingDate) return;
+    this.#intradayTradingDate = tradingDate;
+    this.#intradayBreadth.clear();
+    this.#lastIntradayPrunedAt = 0;
+  }
+
+  private observeMarketRegimeQuote(quote: Quote): void {
+    this.resetIntradayMarketRegimeIfNeeded();
+    const observedAt = Date.parse(quote.receivedAt);
+    const now = Date.now();
+    if (
+      quote.tradingDate !== this.#intradayTradingDate ||
+      !Number.isFinite(observedAt) ||
+      observedAt > now + 5_000 ||
+      now - observedAt > this.intradayQuoteMaxAgeMs() ||
+      quote.open === undefined ||
+      !Number.isFinite(quote.open) ||
+      quote.open <= 0 ||
+      !Number.isFinite(quote.price) ||
+      quote.price <= 0
+    ) return;
+    const instrument = this.repository.getInstrument(quote.symbol);
+    if (!instrument || !readInstrumentSafetyMetadata(instrument).buyAllowed) return;
+    this.#intradayBreadth.set(quote.symbol, {
+      advancing: quote.price > quote.open,
+      observedAt,
+    });
+    this.updateMarketRegimeMetric();
+  }
+
+  private refreshDailyMarketRegime(): void {
+    const settings = this.marketRegimeSettings();
+    const tradingDate = koreanTradingDate();
+    const expectedLatestDate = this.latestCompletedTradingDate();
+    let sampleCount = 0;
+    let aboveLongMaCount = 0;
+    for (const instrument of this.repository.listInstruments(true)) {
+      if (!readInstrumentSafetyMetadata(instrument).buyAllowed) continue;
+      const bars = this.repository
+        .listDailyBars(instrument.symbol, { limit: settings.longPeriod + 1 })
+        .filter((bar) => bar.tradingDate < tradingDate)
+        .slice(-settings.longPeriod);
+      if (bars.length < settings.longPeriod) continue;
+      const latest = bars.at(-1);
+      if (!latest || latest.tradingDate !== expectedLatestDate) continue;
+      const average = bars.reduce((sum, bar) => sum + bar.close, 0) / bars.length;
+      if (!Number.isFinite(average) || average <= 0) continue;
+      sampleCount += 1;
+      if (latest.close >= average) aboveLongMaCount += 1;
+    }
+    this.#dailyRegimeSampleCount = sampleCount;
+    this.#dailyAboveLongMaCount = aboveLongMaCount;
+  }
+
+  private updateMarketRegimeMetric(): void {
+    this.resetIntradayMarketRegimeIfNeeded();
+    this.pruneExpiredIntradayBreadth();
+    const intradayAdvancingCount = [...this.#intradayBreadth.values()]
+      .filter((observation) => observation.advancing).length;
+    const previous = this.#metrics.marketRegime;
+    const current = evaluateMarketRegime({
+      settings: this.marketRegimeSettings(),
+      dailySampleCount: this.#dailyRegimeSampleCount,
+      dailyAboveLongMaCount: this.#dailyAboveLongMaCount,
+      intradaySampleCount: this.#intradayBreadth.size,
+      intradayAdvancingCount,
+      requireIntradayEvidence: this.options
+        .getRuntimes()
+        .some((runtime) => this.options.isMarketOpen(runtime.adapter)),
+      checkedAt: toIsoDateTime(),
+    });
+    this.#metrics.marketRegime = current;
+    if (
+      current.buyAllowed !== previous.buyAllowed ||
+      current.status !== previous.status ||
+      current.reasonCode !== previous.reasonCode
+    ) {
+      this.options.onMarketRegimeChange?.(current, previous);
     }
   }
 

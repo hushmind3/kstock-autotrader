@@ -51,6 +51,16 @@ export const StrategyConfigSchema = z.record(
 export type StrategyConfigValue = z.infer<typeof StrategyConfigValueSchema>;
 export type StrategyConfig = z.infer<typeof StrategyConfigSchema>;
 
+export const MarketRegimeSettingsSchema = z.object({
+  enabled: z.boolean().default(true),
+  longPeriod: z.number().int().min(20).max(250).default(60),
+  minimumAboveLongMaBps: z.number().int().min(0).max(10_000).default(3_500),
+  minimumIntradayAdvancingBps: z.number().int().min(0).max(10_000).default(3_000),
+  minimumSampleSize: z.number().int().min(20).max(2_500).default(100),
+});
+
+export type MarketRegimeSettings = z.infer<typeof MarketRegimeSettingsSchema>;
+
 export const BrokerRuntimeSettingsSchema = z.object({
   enabled: z.boolean().default(false),
   autoTradingEnabled: z.boolean().default(false),
@@ -77,6 +87,7 @@ export const AppSettingsSchema = z.object({
   staleQuoteMs: z.number().int().min(1_000).max(600_000).default(30_000),
   scanIntervalMs: z.number().int().min(1_000).max(300_000).default(5_000),
   quoteSweepIntervalMs: z.number().int().min(10_000).max(3_600_000).default(120_000),
+  marketRegime: MarketRegimeSettingsSchema.default(() => MarketRegimeSettingsSchema.parse({})),
   brokers: z.record(z.enum(BROKER_IDS), BrokerRuntimeSettingsSchema).default(() => ({
     kiwoom: BrokerRuntimeSettingsSchema.parse({}),
     koreainvestment: BrokerRuntimeSettingsSchema.parse({}),

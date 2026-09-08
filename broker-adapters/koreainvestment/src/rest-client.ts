@@ -17,6 +17,7 @@ import {
   stringValue,
 } from "./utils.js";
 
+const KIS_GATEWAY_THROTTLE_COOLDOWN_MS = 61_000;
 const TOKEN_EXPIRY_SKEW_MS = 5 * 60_000;
 const TOKEN_REISSUE_GUARD_MS = 6 * 60 * 60_000;
 const APPROVAL_CACHE_MS = 23 * 60 * 60_000;
@@ -392,7 +393,14 @@ export class KisRestClient {
 
       const responseCode = stringValue(body.msg_cd);
       if (response.status === 429 || responseCode === "EGW00201") {
-        this.#limiter.defer(request.kind, 2_000, true);
+        // KIS's current official sample waits through the next minute window
+        // after EGW00201. A two-second retry still lands in the same broker
+        // quota window on active accounts and causes repeated scan gaps.
+        this.#limiter.defer(
+          request.kind,
+          KIS_GATEWAY_THROTTLE_COOLDOWN_MS,
+          true,
+        );
       } else if (responseCode === "EGW00215") {
         // Account-ledger limits are stricter than the general REST ceiling.
         this.#limiter.defer("account", 3_000);

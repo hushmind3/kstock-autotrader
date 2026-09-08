@@ -22,6 +22,13 @@ const settingsTabs: Array<{ id: SettingsTab; label: string }> = [
   { id: "common", label: "공통 안전" },
 ];
 
+export function settingsTabFromSearch(search: string): SettingsTab {
+  const requested = new URLSearchParams(search).get("tab");
+  return requested === "common" || requested === "koreainvestment" || requested === "kiwoom"
+    ? requested
+    : "kiwoom";
+}
+
 interface BrokerMarketView {
   orderable: boolean;
   label: string;
@@ -88,6 +95,9 @@ export function SettingsClient() {
     if (current) setDashboard(current);
   }, []);
   useEffect(() => {
+    setActiveTab(settingsTabFromSearch(window.location.search));
+  }, []);
+  useEffect(() => {
     void load();
     const timer = window.setInterval(() => void refreshDashboard(), 3_000);
     return () => window.clearInterval(timer);
@@ -120,7 +130,7 @@ export function SettingsClient() {
   async function control(action: "resume-global" | "halt-all" | "resume-new-buys" | "pause-new-buys"): Promise<void> {
     if (
       action === "resume-global" &&
-      !window.confirm("연결·잔고·체결 확인이 끝난 증권사만 주문 엔진을 켤 수 있습니다. 전체 주문 엔진을 켤까요?")
+      !window.confirm("전체 안전정지를 해제하고 신규매수도 다시 허용할까요? 자동운용을 켠 계좌는 거래 시간이 되면 조건에 따라 계속 사고팔 수 있습니다.")
     ) return;
     if (
       action === "resume-new-buys" &&
@@ -137,7 +147,7 @@ export function SettingsClient() {
       setMessage(action === "halt-all"
         ? "모든 자동주문을 즉시 정지했습니다."
         : action === "resume-global"
-          ? "전체 주문 엔진을 켰습니다. 신규매수 허용 상태는 별도로 유지됩니다."
+          ? "전체 안전정지를 해제하고 신규매수를 허용했습니다. 장이 닫혀도 설정은 유지되며 다음 거래 시간에 자동으로 이어집니다."
           : action === "pause-new-buys"
             ? "새 매수 주문만 정지했습니다. 보유종목의 자동매도는 계속될 수 있습니다."
             : "새 매수 주문을 허용했습니다. 실제 주문 전 나머지 안전 조건도 모두 확인합니다.");
@@ -184,12 +194,22 @@ export function SettingsClient() {
             <section className="settings-card safety-card">
               <div className="safety-copy"><p className="settings-kicker">주문 안전장치</p><h2>모든 계좌에 적용되는 안전 설정</h2><span>전체 정지는 직접 해제하기 전까지 그대로 유지됩니다.</span></div>
               <div className="safety-controls">
-                <div className="safety-control"><span>전체 자동주문</span><strong className={payload.settings.emergencyHalt || !payload.settings.globalAutoTradingEnabled ? "negative" : "positive"}>{payload.settings.emergencyHalt || !payload.settings.globalAutoTradingEnabled ? "모든 자동주문 정지" : "자동주문 켜짐"}</strong>{payload.settings.emergencyHalt || !payload.settings.globalAutoTradingEnabled ? <button onClick={() => void control("resume-global")}><ShieldCheck size={15} />전체 자동주문 켜기</button> : <button className="danger-button" onClick={() => void control("halt-all")}><AlertTriangle size={15} />모든 주문 즉시 정지</button>}</div>
+                <div className="safety-control"><span>전체 자동주문</span><strong className={payload.settings.emergencyHalt || !payload.settings.globalAutoTradingEnabled ? "negative" : "positive"}>{payload.settings.emergencyHalt || !payload.settings.globalAutoTradingEnabled ? "모든 자동주문 정지" : "자동주문 켜짐"}</strong>{payload.settings.emergencyHalt || !payload.settings.globalAutoTradingEnabled ? <button onClick={() => void control("resume-global")}><ShieldCheck size={15} />전체 자동운용 다시 켜기</button> : <button className="danger-button" onClick={() => void control("halt-all")}><AlertTriangle size={15} />모든 주문 즉시 정지</button>}</div>
                 <div className="safety-control"><span>새 종목 매수</span><strong className={payload.settings.newBuysPaused ? "negative" : "positive"}>{payload.settings.newBuysPaused ? "새 매수 정지" : "새 매수 허용"}</strong>{payload.settings.newBuysPaused ? <button onClick={() => void control("resume-new-buys")}><ShieldCheck size={15} />새 종목 매수 켜기</button> : <button className="danger-button" onClick={() => void control("pause-new-buys")}><AlertTriangle size={15} />새 종목 매수 멈추기</button>}</div>
               </div>
             </section>
 
             <TradeStartGuide payload={payload} dashboard={dashboard} />
+
+            <section className="settings-card form-section">
+              <div className="form-heading"><div><p className="settings-kicker">장세 자동 판단</p><h2>장이 나쁘면 새로 사지 않고 기다립니다</h2><p className="form-description">코스피 종목 전체의 실제 확정 가격과 오늘 시세를 함께 봅니다. 약세로 판단하면 신규매수만 자동으로 쉬고, 이미 가진 종목의 매도·익절 감시는 계속합니다. 장이 회복되면 사람이 누르지 않아도 신규매수를 자동 재개합니다.</p></div><div className="toggle-row"><Toggle label="약세장 자동 매수대기" checked={payload.settings.marketRegime.enabled} onChange={(enabled) => setPayload({ ...payload, settings: { ...payload.settings, marketRegime: { ...payload.settings.marketRegime, enabled } } })} /></div></div>
+              <div className="form-grid four">
+                <NumberField label="긴 흐름을 볼 기간" value={payload.settings.marketRegime.longPeriod} onChange={(longPeriod) => setPayload({ ...payload, settings: { ...payload.settings, marketRegime: { ...payload.settings.marketRegime, longPeriod } } })} suffix="거래일" min={20} max={250} help="각 종목이 이 기간의 평균가격보다 위인지 확인합니다. 기본값은 60일입니다." />
+                <PercentField label="평균선 위 종목 최소 비율" valueBps={payload.settings.marketRegime.minimumAboveLongMaBps} onChange={(minimumAboveLongMaBps) => setPayload({ ...payload, settings: { ...payload.settings, marketRegime: { ...payload.settings.marketRegime, minimumAboveLongMaBps } } })} min={0} max={100} help="이 비율보다 적으면 시장 전체 흐름이 약하다고 보고 새 매수를 쉽니다." />
+                <PercentField label="오늘 오르는 종목 최소 비율" valueBps={payload.settings.marketRegime.minimumIntradayAdvancingBps} onChange={(minimumIntradayAdvancingBps) => setPayload({ ...payload, settings: { ...payload.settings, marketRegime: { ...payload.settings.marketRegime, minimumIntradayAdvancingBps } } })} min={0} max={100} help="오늘 시가보다 오른 종목 비율이 이 값보다 낮으면 새 매수를 쉽니다." />
+                <NumberField label="판단에 필요한 최소 종목" value={payload.settings.marketRegime.minimumSampleSize} onChange={(minimumSampleSize) => setPayload({ ...payload, settings: { ...payload.settings, marketRegime: { ...payload.settings.marketRegime, minimumSampleSize } } })} suffix="개" min={20} max={2500} help="표본이 모자라면 추측하지 않고 신규매수를 기다립니다." />
+              </div>
+            </section>
 
             <section className="settings-card trade-guide">
               <div className="trade-guide-heading">
@@ -258,12 +278,24 @@ function TradeStartGuide({ payload, dashboard }: {
         const globalNewBuysAllowed = dashboard
           ? !dashboard.engine.newBuysPaused
           : !payload.settings.newBuysPaused;
+        const marketRegime = dashboard?.market.regime;
+        const marketRegimeBuyAllowed = marketRegime?.buyAllowed ?? false;
+        const marketRegimeStatus = !marketRegime
+          ? "확인 중"
+          : !marketRegime.enabled
+            ? "사용 안 함"
+            : marketRegime.buyAllowed
+              ? "신규매수 가능"
+              : marketRegime.status === "WEAK"
+                ? "약세장으로 자동 대기"
+                : "판단 자료 확인 중";
         const checks = [
           { label: "전체 자동주문", ready: globalEngineOn, status: globalEngineOn ? "켜짐" : "꺼짐", state: globalEngineOn ? "ready" : "blocked" },
           { label: "새 종목 매수", ready: globalNewBuysAllowed, status: globalNewBuysAllowed ? "허용" : "정지", state: globalNewBuysAllowed ? "ready" : "blocked" },
           { label: `${brokerNames[id]} 계좌 사용`, ready: broker.enabled, status: broker.enabled ? "사용 중" : "사용 안 함", state: broker.enabled ? "ready" : "blocked" },
           { label: "조건 맞으면 자동 주문", ready: broker.autoTradingEnabled, status: broker.autoTradingEnabled ? "사용 중" : "사용 안 함", state: broker.autoTradingEnabled ? "ready" : "blocked" },
           { label: "새 종목도 매수", ready: !broker.newBuysPaused, status: !broker.newBuysPaused ? "허용" : "정지", state: !broker.newBuysPaused ? "ready" : "blocked" },
+          { label: "시장 전체 흐름", ready: marketRegimeBuyAllowed, status: marketRegimeStatus, state: marketRegimeBuyAllowed ? "ready" : "waiting" },
           { label: "로그인·잔고·실시간 가격", ready: connectionHealthy, status: connectionHealthy ? "연결 완료" : connectionFailed ? "확인 필요" : broker.enabled ? "연결 중" : "계좌 사용 안 함", state: connectionHealthy ? "ready" : connectionFailed || !broker.enabled ? "blocked" : "waiting" },
           { label: `주문 시장(${orderRoute === "SOR" ? "자동 선택" : orderRoute})`, ready: marketOpen, status: marketLabel, state: marketOpen ? "ready" : "waiting" },
         ];
@@ -274,6 +306,7 @@ function TradeStartGuide({ payload, dashboard }: {
           !broker.enabled ||
           !broker.autoTradingEnabled ||
           broker.newBuysPaused;
+        const marketRegimeWaiting = !marketRegimeBuyAllowed;
         const summary = ready
           ? "신규매수 가능"
           : connectionFailed
@@ -284,7 +317,9 @@ function TradeStartGuide({ payload, dashboard }: {
                 ? "신규매수 정지"
                 : !marketOpen
                   ? "장 시작 대기"
-                  : "주문 준비 중";
+                  : marketRegimeWaiting
+                    ? marketRegime?.status === "WEAK" ? "약세장 매수 대기" : "장세 자료 확인 중"
+                    : "주문 준비 중";
         return <article key={id} className="trade-broker-checks">
           <header><strong>{brokerNames[id]} · {broker.environment === "live" ? "실전투자" : "모의투자"}</strong><b className={ready ? "positive" : operatorStopped || connectionFailed ? "negative" : "trade-waiting"}>{summary}</b></header>
           <ul>{checks.map((check) => <li key={check.label} className={check.state}><span aria-hidden>{check.state === "ready" ? "✓" : check.state === "blocked" ? "×" : "•"}</span>{check.label}<b>{check.status}</b></li>)}</ul>
@@ -466,20 +501,6 @@ function BrokerSettingsPanel({ id, settings, strategies, update }: { id: BrokerI
       strategyConfig: strategy ? { ...strategy.defaultConfig } : current.strategyConfig,
     }));
   };
-  const changeAutoTrading = (value: boolean) => {
-    if (
-      value && settings.environment === "live" &&
-      !window.confirm(`${brokerNames[id]} 실전 자동주문을 켜도록 설정합니다. 설정 저장 후 다른 안전 조건도 모두 충족하면 실제 주문이 나갈 수 있습니다. 계속할까요?`)
-    ) return;
-    set("autoTradingEnabled", value);
-  };
-  const changeNewBuyPause = (paused: boolean) => {
-    if (
-      !paused && settings.environment === "live" &&
-      !window.confirm(`${brokerNames[id]} 실전계좌의 신규매수를 허용하도록 설정합니다. 설정 저장 후 전략 조건이 맞으면 실제 매수 주문이 나갈 수 있습니다. 계속할까요?`)
-    ) return;
-    set("newBuysPaused", paused);
-  };
   const changeResumeAfterRestart = (value: boolean) => {
     if (
       value && settings.environment === "live" &&
@@ -488,8 +509,8 @@ function BrokerSettingsPanel({ id, settings, strategies, update }: { id: BrokerI
     set("resumeAfterRestart", value);
   };
 
-  return <section className="settings-card form-section"><div className="form-heading"><div><p className="settings-kicker">계좌별 운용 설정</p><h2>{brokerNames[id]}</h2><p className="form-description">아래 스위치와 숫자를 바꾼 뒤 위의 ‘설정 저장’을 눌러야 엔진에 반영됩니다.</p></div><div className="toggle-row"><Toggle label="이 계좌 사용" checked={settings.enabled} onChange={(value) => set("enabled", value)} /><Toggle label="조건 맞으면 자동 주문" checked={settings.autoTradingEnabled} onChange={changeAutoTrading} /><Toggle label="새 종목도 매수" checked={!settings.newBuysPaused} onChange={(value) => changeNewBuyPause(!value)} /><Toggle label="재시작 뒤 자동 복구" checked={settings.resumeAfterRestart} onChange={changeResumeAfterRestart} /></div></div>
-    <div className="toggle-guidance four"><span><strong>이 계좌 사용</strong>을 끄면 이 증권사에 접속하지 않습니다.</span><span><strong>조건 맞으면 자동 주문</strong>을 켜야 실제 매수·매도 주문을 보낼 수 있습니다.</span><span><strong>새 종목도 매수</strong>를 꺼도 이미 가진 종목의 자동매도는 계속될 수 있습니다.</span><span><strong>재시작 뒤 자동 복구</strong>는 서버가 다시 켜지면 계좌를 먼저 확인한 뒤 마지막 운용 상태를 이어갑니다. 긴급정지는 자동으로 풀지 않습니다.</span></div>
+  return <section className="settings-card form-section"><div className="form-heading"><div><p className="settings-kicker">계좌별 운용 설정</p><h2>{brokerNames[id]}</h2><p className="form-description">매매 조건과 금액을 저장하는 곳입니다. 실제 자동매매 시작·완전정지는 <Link href="/">자동매매 현황</Link>의 계좌 버튼에서 즉시 바꿉니다.</p></div><div className="toggle-row"><Toggle label="이 계좌 연결 사용" checked={settings.enabled} onChange={(value) => set("enabled", value)} /><Toggle label="재시작 뒤 자동으로 계속" checked={settings.resumeAfterRestart} onChange={changeResumeAfterRestart} /></div></div>
+    <div className="toggle-guidance"><span><strong>이 계좌 연결 사용</strong>을 끄면 이 증권사 API에 접속하지 않습니다.</span><span><strong>재시작 뒤 자동으로 계속</strong>을 켜두면 장 마감이나 서버 재시작 뒤에도 마지막 자동운용 상태를 이어갑니다. 안전 확인이 끝나기 전에는 주문하지 않습니다.</span><span><strong>운용 ON/OFF는 설정 저장으로 바뀌지 않습니다.</strong> 오래 열어둔 화면이 자동매매 상태를 되돌리는 일을 막았습니다.</span></div>
     <div className="form-grid four"><SelectField label="사용할 계좌 종류" value={settings.environment} onChange={(value) => set("environment", value as "live" | "paper")} options={[{ value: "paper", label: "모의투자 계좌" }, { value: "live", label: "실전투자 계좌" }]} danger={settings.environment === "live"} help="실전투자는 실제 돈으로 주문합니다. 바꾼 뒤 해당 환경의 API 키를 연결해야 합니다." /><SelectField label="주문을 보낼 시장" value={settings.orderRoute} onChange={(value) => set("orderRoute", value as BrokerSettings["orderRoute"])} options={[{ value: "KRX", label: "한국거래소만(KRX)" }, { value: "NXT", label: "넥스트레이드 직접(NXT 지원종목만)" }, { value: "SOR", label: "증권사가 자동 선택(SOR·추천)" }]} help="자동 선택(SOR)은 증권사가 KRX와 NXT 중 가능한 시장으로 보냅니다. NXT 직접 주문은 NXT 지원종목에만 가능하며, 지원하지 않는 종목은 증권사가 거절합니다. 조건검사는 자동매매가 꺼져 있어도 계속됩니다." /><SelectField label="매매 조건" value={settings.strategyId} onChange={changeStrategy} options={strategies.map((strategy) => ({ value: strategy.id, label: `${strategy.name} (${strategy.version}판)` }))} help="어떤 계산 규칙으로 매수·매도 후보를 찾을지 선택합니다. 선택하면 아래 숫자가 해당 전략의 기본값으로 바뀝니다." /><SelectField label="주문 가격 방식" value={settings.orderPolicy.orderType} onChange={(value) => setPolicy("orderType", value as "market" | "limit")} options={[{ value: "market", label: "시장가: 바로 살 수 있는 가격" }, { value: "limit", label: "지정가: 내가 정한 가격" }]} help="시장가는 체결 가능성이 높지만 가격이 달라질 수 있고, 지정가는 정한 가격에 닿지 않으면 체결되지 않을 수 있습니다." /></div>
     <h3>투자금·손실·미체결 안전 한도</h3><div className="form-grid four"><NumberField label="한 번 살 금액" value={settings.orderPolicy.perTradeBudget} onChange={(value) => setPolicy("perTradeBudget", value)} suffix="원" min={1} help="매수 신호 한 번에 사용할 목표 금액입니다. 현재가로 살 수 있는 정수 수량만 주문합니다." /><NumberField label="한 종목에 넣을 최대금액" value={settings.orderPolicy.perSymbolLimit} onChange={(value) => setPolicy("perSymbolLimit", value)} suffix="원" min={1} help="이미 보유한 금액과 진행 중인 매수 주문을 합쳐 이 금액을 넘지 않게 합니다." /><NumberField label="이 계좌에서 쓸 최대금액" value={settings.orderPolicy.accountInvestmentLimit} onChange={(value) => setPolicy("accountInvestmentLimit", value)} suffix="원" min={1} help="이 증권사 계좌의 전체 보유금액과 진행 중인 매수 주문 합계 한도입니다." /><NumberField label="하루 동안 새로 살 최대금액" value={settings.orderPolicy.dailyInvestmentLimit} onChange={(value) => setPolicy("dailyInvestmentLimit", value)} suffix="원" min={1} help="오늘 새로 낸 매수 주문의 누적 금액이 이 한도를 넘으면 추가 매수를 막습니다." /><NumberField label="하루 손실 자동정지 기준" value={settings.orderPolicy.dailyMaxLoss} onChange={(value) => setPolicy("dailyMaxLoss", value)} suffix="원" min={1} help="오늘 손익이 이 금액만큼 손실이면 추가 매수를 막습니다." /><NumberField label="동시에 보유할 종목 수" value={settings.orderPolicy.maxPositions} onChange={(value) => setPolicy("maxPositions", value)} suffix="개" min={1} help="보유종목과 아직 체결되지 않은 신규 매수종목을 합친 최대 개수입니다." /><PercentField label="지정가 조정률" valueBps={settings.orderPolicy.limitOffsetBps} onChange={(value) => setPolicy("limitOffsetBps", value)} help="지정가 주문에만 사용합니다. 0%면 현재가 기준이며, 양수는 더 높은 가격으로 조정합니다." /><NumberField label="미체결 주문을 기다릴 시간" value={settings.orderPolicy.unfilledTimeoutSeconds} onChange={(value) => setPolicy("unfilledTimeoutSeconds", value)} suffix="초" min={10} help="이 시간이 지나도 전부 체결되지 않으면 아래 자동취소 설정을 적용합니다." /><Toggle label="시간이 지나면 남은 수량 취소" checked={settings.orderPolicy.cancelRemainderOnTimeout} onChange={(value) => setPolicy("cancelRemainderOnTimeout", value)} help="부분체결된 주문은 체결된 수량을 유지하고 남은 수량만 취소합니다." /></div>
     <h3>보유종목 목표수익 익절</h3><div className="form-grid four"><Toggle label="목표수익에 도달하면 자동매도" checked={settings.orderPolicy.takeProfitEnabled} onChange={(value) => setPolicy("takeProfitEnabled", value)} help="모든 전략에 공통 적용합니다. 기본값은 꺼짐이며, 켜고 저장해야 작동합니다." /><PercentField label="익절 목표수익률" valueBps={settings.orderPolicy.takeProfitBps} onChange={(value) => setPolicy("takeProfitBps", value)} min={0.01} max={100} help="평균 매수가 대비 현재가 수익률이 이 값 이상이면 보유 가능 수량 전체를 매도 후보로 봅니다. 시장가 체결가격은 달라질 수 있습니다." /></div>

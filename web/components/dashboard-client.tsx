@@ -114,6 +114,35 @@ function candidateActionLabel(action: string): string {
   return "조건 감지";
 }
 
+function breadthPercent(value: number | null): string {
+  return value === null ? "확인 중" : `${(value / 100).toFixed(1)}%`;
+}
+
+function marketRegimeTitle(data: DashboardResponse): string {
+  if (!data.market.regime.enabled) return "장세 자동 판단을 사용하지 않습니다";
+  if (data.market.regime.status === "NORMAL") return "장세 자동 판단: 신규매수 가능";
+  if (data.market.regime.status === "WEAK") return "약세장 감지: 신규매수 자동 대기";
+  return "장세 자료 확인 중: 신규매수 자동 대기";
+}
+
+function marketRegimeDescription(data: DashboardResponse): string {
+  const regime = data.market.regime;
+  if (!regime.enabled) return "선택한 종목 전략과 계좌 안전한도만 적용합니다.";
+  if (regime.reasonCode === "DAILY_BREADTH_NOT_READY") {
+    return `긴 시장 흐름을 판단할 종목이 ${formatNumber(regime.dailySampleCount)}개라 자료가 더 필요합니다.`;
+  }
+  if (regime.reasonCode === "DAILY_BREADTH_WEAK") {
+    return `장기 평균가격 위에 있는 종목이 ${breadthPercent(regime.dailyAboveLongMaBps)}뿐이라 새 매수를 쉽니다.`;
+  }
+  if (regime.reasonCode === "INTRADAY_BREADTH_NOT_READY") {
+    return `오늘 장세를 판단할 실시간 종목이 ${formatNumber(regime.intradaySampleCount)}개라 조금 더 확인합니다.`;
+  }
+  if (regime.reasonCode === "INTRADAY_BREADTH_WEAK") {
+    return `오늘 시가보다 오른 종목이 ${breadthPercent(regime.intradayAdvancingBps)}뿐이라 새 매수를 쉽니다.`;
+  }
+  return `장기 평균가격 위 종목 ${breadthPercent(regime.dailyAboveLongMaBps)} · 오늘 상승 종목 ${breadthPercent(regime.intradayAdvancingBps)}입니다.`;
+}
+
 function conditionScanHint(data: DashboardResponse | null): string {
   if (!data) return "조건 검사 상태 확인 중";
   if (data.market.scanMode === "LAST_SAVED") {
@@ -148,22 +177,30 @@ export function isBrokerAutomationArmed(data: DashboardResponse, broker: BrokerD
   return (
     !data.engine.emergencyHalt &&
     data.engine.globalAutoTradingEnabled &&
-    !data.engine.newBuysPaused &&
     broker.enabled &&
-    broker.autoTradingEnabled &&
-    !broker.newBuysPaused
+    broker.autoTradingEnabled
   );
 }
 
-export function brokerAutomationLabel(data: DashboardResponse, broker: BrokerDashboard): string {
-  return isBrokerAutomationArmed(data, broker)
-    ? "자동운용 설정 켜짐"
-    : "자동운용 설정 꺼짐";
+export function isBrokerNewBuyPaused(data: DashboardResponse, broker: BrokerDashboard): boolean {
+  return data.engine.newBuysPaused || broker.newBuysPaused;
 }
 
-export function brokerAutomationButtonLabel(enabled: boolean, automationArmed: boolean): string {
+export function brokerAutomationLabel(data: DashboardResponse, broker: BrokerDashboard): string {
+  if (!isBrokerAutomationArmed(data, broker)) return "자동매매 완전 정지";
+  return isBrokerNewBuyPaused(data, broker)
+    ? "자동매매 중 · 신규매수 일시정지"
+    : "계속 자동매매 중";
+}
+
+export function brokerAutomationButtonLabel(
+  enabled: boolean,
+  automationArmed: boolean,
+  newBuysPaused = false,
+): string {
   if (!enabled) return "설정에서 연결 사용 켜기";
-  return automationArmed ? "이 계좌 자동운용 끄기" : "이 계좌 자동운용 켜기";
+  if (!automationArmed) return "이 계좌 계속 자동매매 시작";
+  return newBuysPaused ? "신규매수도 다시 시작" : "이 계좌 자동매매 완전 정지";
 }
 
 export function brokerMarketStatusLabel(
@@ -178,7 +215,7 @@ export function brokerMarketStatusLabel(
   return "시장 대기 · 가격 감시는 계속";
 }
 
-function brokerOrderReadiness(data: DashboardResponse, broker: BrokerDashboard): string {
+export function brokerOrderReadiness(data: DashboardResponse, broker: BrokerDashboard): string {
   if (!broker.enabled) return "연결 사용 안 함";
   if (data.engine.emergencyHalt || !data.engine.globalAutoTradingEnabled) return "전체 자동주문 정지";
   if (!broker.autoTradingEnabled) return "이 계좌 자동매매 꺼짐";
@@ -193,6 +230,11 @@ function brokerOrderReadiness(data: DashboardResponse, broker: BrokerDashboard):
   }
   if (!isBrokerMarketOrderable(data, broker)) return "시장 대기 · 조건 감시는 계속";
   if (!broker.connection.readyForOrders) return "거래 시간 · 주문 연결 확인 중";
+  if (!data.market.regime.buyAllowed) {
+    return data.market.regime.status === "WEAK"
+      ? "자동매도 감시 중 · 신규매수 약세장 대기"
+      : "자동매도 감시 중 · 신규매수 자료 확인 중";
+  }
   return "현재 주문 가능 · 조건 감시 중";
 }
 
@@ -234,7 +276,7 @@ export function DashboardClient() {
     environment?: BrokerDashboard["environment"],
   ): Promise<void> {
     const destructive = action === "halt-all";
-    if (destructive && !window.confirm("모든 신규 주문을 즉시 중지합니다. 계속할까요?")) return;
+    if (destructive && !window.confirm("모든 계좌의 자동매수와 자동매도를 즉시 정지합니다. 계속할까요?")) return;
     if (
       action === "start-broker" &&
       environment === "live" &&
@@ -306,7 +348,14 @@ export function DashboardClient() {
         <section className="notice warning"><ShieldAlert size={18} /><div><strong>안전 정지 상태</strong><p>계좌에 돈이 있어도 주문되지 않습니다. 연결·잔고·설정을 확인한 뒤 설정 화면에서 직접 해제하세요.</p></div><Link href="/settings">설정 확인</Link></section>
       ) : null}
       {data ? (
-        <section className="notice"><ShieldAlert size={18} /><div><strong>자동운용 설정은 매일 다시 누를 필요가 없습니다</strong><p>한 번 켜고 ‘재시작 후 자동복구’를 사용하면 시장이 닫힌 동안에도 감시를 계속하고 다음 거래 시간에 자동으로 주문 준비를 확인합니다. 입금만으로 설정이 임의로 켜지지는 않습니다.</p></div><Link href="/settings">자동운용 설정</Link></section>
+        <section className="notice"><ShieldAlert size={18} /><div><strong>자동운용 설정은 매일 다시 누를 필요가 없습니다</strong><p>한 번 켜고 ‘재시작 후 자동복구’를 사용하면 시장이 닫힌 동안에도 감시를 계속하고 다음 거래 시간에 자동으로 주문 준비를 확인합니다. 입금만으로 설정이 임의로 켜지지는 않습니다.</p></div><Link href="/settings?tab=common">자동운용 설정</Link></section>
+      ) : null}
+      {data ? (
+        <section className={`notice ${data.market.regime.enabled && !data.market.regime.buyAllowed ? "warning" : ""}`}>
+          <ShieldAlert size={18} />
+          <div><strong>{marketRegimeTitle(data)}</strong><p>{marketRegimeDescription(data)} 기존 보유종목의 매도·익절 감시는 장세와 관계없이 계속합니다.</p></div>
+          <Link href="/settings?tab=common">장세 기준 설정</Link>
+        </section>
       ) : null}
 
       <div className="filter-tabs" role="group" aria-label="증권사별 화면 필터">
@@ -323,11 +372,15 @@ export function DashboardClient() {
       <section className="broker-grid">
         {filtered.brokers.length === 0 ? <EmptyCard title="연결된 증권사가 없습니다" detail="설정 화면에서 증권사와 계좌 환경을 구성하세요." /> : filtered.brokers.map((broker) => {
           const automationArmed = data ? isBrokerAutomationArmed(data, broker) : false;
+          const newBuysPaused = data ? isBrokerNewBuyPaused(data, broker) : true;
           return <article className="broker-card" key={broker.brokerId}>
-            <div className="card-head"><div><p>증권사 계좌</p><h2>{broker.name}</h2></div><span className={`status ${automationArmed ? "on" : "off"}`}>{data ? brokerAutomationLabel(data, broker) : "설정 확인 중"}</span></div>
+            <div className="card-head"><div><p>증권사 계좌</p><h2>{broker.name}</h2></div><span className={`status ${!automationArmed ? "off" : newBuysPaused ? "paused" : "on"}`}>{data ? brokerAutomationLabel(data, broker) : "설정 확인 중"}</span></div>
             <div className={`mode-strip ${broker.environment}`}>{broker.environment === "live" ? "실전투자" : "모의투자"}<span>{broker.maskedAccountId ?? "계좌 미설정"}</span></div>
             <dl><div><dt>연결 상태</dt><dd>{connectionLabel[broker.connection.stage]}</dd></div><div><dt>증권사 로그인</dt><dd>{broker.connection.brokerAuthenticated ? "완료" : "대기"}</dd></div><div><dt>계좌잔고 불러오기</dt><dd>{broker.connection.accountSynchronized ? "완료" : "대기"}</dd></div><div><dt>현재 시장 시간</dt><dd>{data ? brokerMarketStatusLabel(data, broker) : "상태 확인 중"}</dd></div><div><dt>실제 주문 상태</dt><dd>{data ? brokerOrderReadiness(data, broker) : "엔진 상태 확인 중"}</dd></div><div><dt>사용 전략</dt><dd>{strategyLabel(broker.strategyId)}</dd></div><div><dt>실시간 가격 감시</dt><dd>{formatNumber(broker.liveSubscriptions)}종목</dd></div></dl>
-            <button className="secondary-button" disabled={busy || !broker.enabled} onClick={() => void control(automationArmed ? "pause-broker" : "start-broker", broker.brokerId, broker.environment)}>{automationArmed ? <CirclePause size={15} /> : <Play size={15} />}{brokerAutomationButtonLabel(broker.enabled, automationArmed)}</button>
+            <div className="broker-actions">
+              <button className="secondary-button" disabled={busy || !broker.enabled} onClick={() => void control(!automationArmed || newBuysPaused ? "start-broker" : "pause-broker", broker.brokerId, broker.environment)}>{!automationArmed || newBuysPaused ? <Play size={15} /> : <CirclePause size={15} />}{brokerAutomationButtonLabel(broker.enabled, automationArmed, newBuysPaused)}</button>
+              {automationArmed && newBuysPaused ? <button className="danger-button" disabled={busy} onClick={() => void control("pause-broker", broker.brokerId, broker.environment)}><CirclePause size={15} />매수·매도 모두 정지</button> : null}
+            </div>
             {data && !broker.connection.readyForOrders && !broker.connection.lastError ? <p className="inline-status">{isBrokerMarketOrderable(data, broker) ? `거래 시간이지만 아직 실제 주문을 보낼 수 없습니다. 현재 단계: ${connectionLabel[broker.connection.stage]}` : "현재 주문 가능한 시장 시간이 아닙니다. 감시 엔진은 멈추지 않고 다음 거래 시간을 자동 확인합니다."}</p> : null}
             {broker.lastError ? <p className="inline-error">증권사 연결에 문제가 있습니다. 시스템 기록에서 원인을 확인하세요.</p> : null}
           </article>

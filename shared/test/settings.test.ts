@@ -7,9 +7,17 @@ describe("settings compatibility", () => {
     const brokers = legacy.brokers as Record<string, { orderPolicy: Record<string, unknown> }>;
     delete brokers.kiwoom.orderPolicy.takeProfitEnabled;
     delete brokers.kiwoom.orderPolicy.takeProfitBps;
+    delete legacy.marketRegime;
     const parsed = AppSettingsSchema.parse(legacy);
     expect(parsed.brokers.kiwoom.orderPolicy.takeProfitEnabled).toBe(false);
     expect(parsed.brokers.kiwoom.orderPolicy.takeProfitBps).toBe(500);
+    expect(parsed.marketRegime).toMatchObject({
+      enabled: true,
+      longPeriod: 60,
+      minimumAboveLongMaBps: 3_500,
+      minimumIntradayAdvancingBps: 3_000,
+      minimumSampleSize: 100,
+    });
   });
 
   it("accepts a strategy-specific primitive configuration object", () => {

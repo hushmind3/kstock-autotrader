@@ -25,6 +25,12 @@ describe("MarketClock", () => {
     expect(session.isTradingDay).toBe(false);
   });
 
+  it("finds the latest completed session using weekends and the official calendar", () => {
+    const clock = new MarketClock();
+    clock.applyOfficialCalendar([{ tradingDate: "2026-09-04", isOpen: false }]);
+    expect(clock.previousTradingDate("2026-09-07")).toBe("2026-09-03");
+  });
+
   it("lets a KRX broker event close only KRX while NXT remains independent", () => {
     const clock = new MarketClock();
     clock.applyBrokerStatus("CLOSED", "2026-08-31T01:00:00.000Z");
