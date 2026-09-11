@@ -1,4 +1,5 @@
 export * from "./breakout-volume.js";
+export * from "./intraday-momentum.js";
 export * from "./moving-average.js";
 export * from "./pullback-rebound.js";
 export * from "./registry.js";

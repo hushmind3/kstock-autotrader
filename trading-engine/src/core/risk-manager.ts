@@ -27,6 +27,8 @@ export interface RiskCheckInput {
   marketRegimeBuyAllowed?: boolean;
   marketRegimeReasonCode?: string;
   marketOpen: boolean;
+  /** A cost-aware profit signal cannot send a limit below its own target. */
+  minimumSellPrice?: number;
   now?: Date;
 }
 
@@ -115,7 +117,7 @@ export class RiskManager {
     if (input.quote.exchange !== expectedRoute) {
       failures.push("QUOTE_ROUTE_MISMATCH");
     }
-    if (input.quote.price <= 0) failures.push("INVALID_PRICE");
+    if (!Number.isFinite(input.quote.price) || input.quote.price <= 0) failures.push("INVALID_PRICE");
     if (input.openOrders.some((order) => order.symbol === input.symbol)) {
       failures.push("ACTIVE_ORDER_EXISTS");
     }
@@ -134,11 +136,12 @@ export class RiskManager {
           quantity: position?.availableQuantity ?? 0,
           ...(input.brokerSettings.orderPolicy.orderType === "limit"
             ? {
-                limitPrice: alignedLimitPrice(
+                limitPrice: Math.max(alignedLimitPrice(
                   input.quote.price,
                   input.brokerSettings.orderPolicy.limitOffsetBps,
                   "sell",
-                ),
+                ), input.minimumSellPrice !== undefined && Number.isFinite(input.minimumSellPrice)
+                  ? alignedLimitPrice(input.minimumSellPrice, 0, "sell") : 0),
               }
             : {}),
           exchange:
@@ -192,19 +195,30 @@ export class RiskManager {
           "buy",
         )
       : undefined;
+    const policy = input.brokerSettings.orderPolicy;
     const sizingPrice = buyLimitPrice ?? input.quote.price;
-    const quantity = Math.floor(input.brokerSettings.orderPolicy.perTradeBudget / sizingPrice);
-    if (quantity < 1) failures.push("BUDGET_BELOW_ONE_SHARE");
-    const estimatedAmount = quantity * sizingPrice;
     const accountExposure = input.positions.reduce((sum, row) => sum + Math.max(0, row.marketValue), 0);
     const symbolExposure = Math.max(0, position?.marketValue ?? 0);
+    const dailyLimitEnabled = policy.dailyInvestmentLimitEnabled !== false;
+    const availableBudget = policy.sizeToAvailableBudget ? Math.max(0, Math.min(
+      policy.perTradeBudget,
+      policy.perSymbolLimit - symbolExposure,
+      policy.accountInvestmentLimit - accountExposure - input.reservedAmount,
+      (input.availableCash !== null && Number.isFinite(input.availableCash) ? input.availableCash : 0) - input.reservedAmount,
+      dailyLimitEnabled ? policy.dailyInvestmentLimit - input.dailyInvestedAmount - input.reservedAmount : Infinity,
+    )) : policy.perTradeBudget;
+    // Keep fee/slippage headroom within the same cash and capital ceilings.
+    const costMultiplier = 1 + policy.estimatedRoundTripCostBps / 10_000;
+    const quantity = Math.floor(availableBudget / (sizingPrice * costMultiplier));
+    if (!Number.isSafeInteger(quantity) || quantity < 1) failures.push("BUDGET_BELOW_ONE_SHARE");
+    const estimatedAmount = Math.ceil(quantity * sizingPrice * costMultiplier);
     if (symbolExposure + estimatedAmount > input.brokerSettings.orderPolicy.perSymbolLimit) {
       failures.push("PER_SYMBOL_LIMIT_EXCEEDED");
     }
     if (accountExposure + input.reservedAmount + estimatedAmount > input.brokerSettings.orderPolicy.accountInvestmentLimit) {
       failures.push("ACCOUNT_INVESTMENT_LIMIT_EXCEEDED");
     }
-    if (input.dailyInvestedAmount + input.reservedAmount + estimatedAmount > input.brokerSettings.orderPolicy.dailyInvestmentLimit) {
+    if (dailyLimitEnabled && input.dailyInvestedAmount + input.reservedAmount + estimatedAmount > input.brokerSettings.orderPolicy.dailyInvestmentLimit) {
       failures.push("DAILY_INVESTMENT_LIMIT_EXCEEDED");
     }
     if (input.availableCash === null || !Number.isFinite(input.availableCash)) {

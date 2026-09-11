@@ -4,7 +4,14 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { AlertTriangle, Check, Clock3, KeyRound, Link2, Save, ShieldCheck, Trash2 } from "lucide-react";
 import { getJson, koreanErrorMessage } from "@/lib/client-api";
-import { autoTradingPresetStrategyId, withAutoTradingPreset } from "../lib/auto-trading-preset";
+import {
+  autoTradingPresetStrategyId,
+  dailyBuyBudgetMultiple,
+  intradayTradingPresetStrategyId,
+  reentryCooldownSeconds,
+  withAutoTradingPreset,
+  withIntradayTradingPreset,
+} from "../lib/auto-trading-preset";
 import type {
   BrokerConnectionReadiness,
   BrokerId,
@@ -236,7 +243,7 @@ export function SettingsClient() {
               : payload.connections[id];
             return <section id={`settings-panel-${id}`} className="settings-tab-panel broker-settings-stack" role="tabpanel" aria-labelledby={`settings-tab-${id}`} tabIndex={0}>
               <CredentialCard key={`${id}:${broker.environment}`} id={id} environment={broker.environment} status={status} connection={connection.environment === broker.environment ? connection : null} market={brokerMarketView(dashboard, broker.orderRoute)} reload={load} />
-              <BrokerSettingsPanel id={id} settings={broker} strategies={payload.strategies} update={(updater) => updateBroker(id, updater)} onPresetFilled={() => { setMessage(null); setPresetNotice(`${brokerNames[id]}의 매수 전략과 자동매도 조건을 화면에 채웠습니다. 위의 ‘설정 저장’을 눌러야 적용됩니다.`); }} />
+              <BrokerSettingsPanel id={id} settings={broker} strategies={payload.strategies} scanIntervalMs={payload.settings.scanIntervalMs} update={(updater) => updateBroker(id, updater)} onPresetFilled={(presetName) => { setMessage(null); setPresetNotice(`${brokerNames[id]}의 ${presetName} 조건을 화면에 채웠습니다. 위의 ‘설정 저장’을 눌러야 적용됩니다.`); }} />
             </section>;
           })()}
         </>
@@ -493,15 +500,25 @@ function ReadinessItem({ label, complete, failed, pending }: {
   return <div><span>{label}</span><b className={complete ? "complete" : failed ? "failed" : "pending"}>{complete ? "완료" : failed ? "확인 필요" : pending}</b></div>;
 }
 
-function BrokerSettingsPanel({ id, settings, strategies, update, onPresetFilled }: { id: BrokerId; settings: BrokerSettings; strategies: SettingsResponse["strategies"]; update: (updater: (value: BrokerSettings) => BrokerSettings) => void; onPresetFilled: () => void }) {
+function BrokerSettingsPanel({ id, settings, strategies, scanIntervalMs, update, onPresetFilled }: { id: BrokerId; settings: BrokerSettings; strategies: SettingsResponse["strategies"]; scanIntervalMs: number; update: (updater: (value: BrokerSettings) => BrokerSettings) => void; onPresetFilled: (presetName: string) => void }) {
   const set = <K extends keyof BrokerSettings>(key: K, value: BrokerSettings[K]) => update((current) => ({ ...current, [key]: value }));
   const setPolicy = <K extends keyof BrokerSettings["orderPolicy"]>(key: K, value: BrokerSettings["orderPolicy"][K]) => update((current) => ({ ...current, orderPolicy: { ...current.orderPolicy, [key]: value } }));
   const selectedStrategy = strategies.find((strategy) => strategy.id === settings.strategyId) ?? strategies[0];
   const presetAvailable = strategies.some((strategy) => strategy.id === autoTradingPresetStrategyId);
+  const intradayPresetAvailable = strategies.some((strategy) => strategy.id === intradayTradingPresetStrategyId);
+  const budgetMultiple = dailyBuyBudgetMultiple(settings.orderPolicy);
+  const dailyInvestmentLimitEnabled = settings.orderPolicy.dailyInvestmentLimitEnabled ?? true;
+  const estimatedCostBps = settings.orderPolicy.estimatedRoundTripCostBps ?? 0;
+  const afterCosts = settings.orderPolicy.takeProfitAfterCosts ?? false;
   const fillAutoTradingPreset = () => {
     if (!presetAvailable) return;
     update((current) => withAutoTradingPreset(current, strategies));
-    onPresetFilled();
+    onPresetFilled("눌림반등 기본 매매");
+  };
+  const fillIntradayTradingPreset = () => {
+    if (!intradayPresetAvailable) return;
+    update((current) => withIntradayTradingPreset(current, strategies));
+    onPresetFilled("초단타 기본 매매");
   };
   const setStrategy = (key: string, value: number) => update((current) => ({ ...current, strategyConfig: { ...current.strategyConfig, [key]: value } }));
   const changeStrategy = (strategyId: string) => {
@@ -524,19 +541,51 @@ function BrokerSettingsPanel({ id, settings, strategies, update, onPresetFilled 
     <div className="toggle-guidance"><span><strong>이 계좌 연결 사용</strong>을 끄면 이 증권사 API에 접속하지 않습니다.</span><span><strong>재시작 뒤 자동으로 계속</strong>을 켜두면 장 마감이나 서버 재시작 뒤에도 마지막 자동운용 상태를 이어갑니다. 안전 확인이 끝나기 전에는 주문하지 않습니다.</span><span><strong>운용 ON/OFF는 설정 저장으로 바뀌지 않습니다.</strong> 오래 열어둔 화면이 자동매매 상태를 되돌리는 일을 막았습니다.</span></div>
     <div className="form-grid four"><SelectField label="사용할 계좌 종류" value={settings.environment} onChange={(value) => set("environment", value as "live" | "paper")} options={[{ value: "paper", label: "모의투자 계좌" }, { value: "live", label: "실전투자 계좌" }]} danger={settings.environment === "live"} help="실전투자는 실제 돈으로 주문합니다. 바꾼 뒤 해당 환경의 API 키를 연결해야 합니다." /><SelectField label="주문을 보낼 시장" value={settings.orderRoute} onChange={(value) => set("orderRoute", value as BrokerSettings["orderRoute"])} options={[{ value: "KRX", label: "한국거래소만(KRX)" }, { value: "NXT", label: "넥스트레이드 직접(NXT 지원종목만)" }, { value: "SOR", label: "증권사가 자동 선택(SOR·추천)" }]} help="자동 선택(SOR)은 증권사가 KRX와 NXT 중 가능한 시장으로 보냅니다. NXT 직접 주문은 NXT 지원종목에만 가능하며, 지원하지 않는 종목은 증권사가 거절합니다. 조건검사는 자동매매가 꺼져 있어도 계속됩니다." /><SelectField label="매매 조건" value={settings.strategyId} onChange={changeStrategy} options={strategies.map((strategy) => ({ value: strategy.id, label: `${strategy.name} (${strategy.version}판)` }))} help="어떤 계산 규칙으로 매수·매도 후보를 찾을지 선택합니다. 선택하면 아래 숫자가 해당 전략의 기본값으로 바뀝니다." /><SelectField label="주문 가격 방식" value={settings.orderPolicy.orderType} onChange={(value) => setPolicy("orderType", value as "market" | "limit")} options={[{ value: "market", label: "시장가: 바로 살 수 있는 가격" }, { value: "limit", label: "지정가: 내가 정한 가격" }]} help="시장가는 체결 가능성이 높지만 가격이 달라질 수 있고, 지정가는 정한 가격에 닿지 않으면 체결되지 않을 수 있습니다." /></div>
     <div className="auto-trading-preset">
+      <button className="secondary" type="button" disabled={!intradayPresetAvailable} onClick={fillIntradayTradingPreset}>초단타 기본값 채우기</button>
+      <p>실시간의 짧은 가격 흐름을 1초 간격으로 검사합니다. 예상 왕복 비용 0.3%를 빼고 0.2% 수익이 나면 팔고, 매수가보다 0.6% 하락하거나 보유시간 15분이 되면 손실이어도 팝니다. 매도 후에는 15초와 새 매수 신호를 기다립니다.</p>
+      <small>입력칸에만 채워지며 ‘설정 저장’을 눌러야 적용됩니다. 하루 누적매수 제한을 끄고 잔고에 맞춘 금액 계산을 켭니다. 지정가 조정률은 0%로 채우며 기존 투자금 숫자·주문방식·계좌·운용 ON/OFF는 유지합니다. 기본 수치는 검증된 최적값이나 수익 보장이 아닙니다. 비용 0.3%는 추정 입력값이며 실제 수수료·세금·체결가격 차이는 계좌와 시장에 따라 다릅니다.{!intradayPresetAvailable ? " 실시간 전략을 불러온 뒤 사용할 수 있습니다." : ""}</small>
+      {settings.orderPolicy.orderType === "limit" ? <small>현재 지정가 조정률은 {(settings.orderPolicy.limitOffsetBps / 100).toFixed(2)}%입니다. 조정 폭이 예상 비용이나 짧은 목표수익보다 크면 체결 가능성과 실제 매매 결과가 달라질 수 있습니다. 초단타 기본값은 현재가 기준인 0%를 사용합니다.</small> : null}
+    </div>
+    <div className="auto-trading-preset">
       <button className="secondary" type="button" disabled={!presetAvailable} onClick={fillAutoTradingPreset}>자동 매매 기본값 채우기</button>
       <p>눌림 뒤 반등할 때 매수하고, 3% 하락하면 매도합니다. 수익이 3%에 도달하면 고점을 따라가며 최고가에서 1.5% 내려올 때 팔고, 5거래일을 채워도 수익률이 1% 이하이면 매도합니다. 매도 후에는 30분과 새 매수 신호를 기다립니다.</p>
       <small>입력칸에만 채워집니다. ‘설정 저장’을 눌러야 적용됩니다. 투자금·주문방식·계좌·운용 ON/OFF는 그대로 유지합니다.{!presetAvailable ? " 기본 전략을 불러온 뒤 사용할 수 있습니다." : ""}</small>
     </div>
-    <h3>투자금·손실·미체결 안전 한도</h3><div className="form-grid four"><NumberField label="한 번 살 금액" value={settings.orderPolicy.perTradeBudget} onChange={(value) => setPolicy("perTradeBudget", value)} suffix="원" min={1} help="매수 신호 한 번에 사용할 목표 금액입니다. 현재가로 살 수 있는 정수 수량만 주문합니다." /><NumberField label="한 종목에 넣을 최대금액" value={settings.orderPolicy.perSymbolLimit} onChange={(value) => setPolicy("perSymbolLimit", value)} suffix="원" min={1} help="이미 보유한 금액과 진행 중인 매수 주문을 합쳐 이 금액을 넘지 않게 합니다." /><NumberField label="이 계좌에서 쓸 최대금액" value={settings.orderPolicy.accountInvestmentLimit} onChange={(value) => setPolicy("accountInvestmentLimit", value)} suffix="원" min={1} help="이 증권사 계좌의 전체 보유금액과 진행 중인 매수 주문 합계 한도입니다." /><NumberField label="하루 동안 새로 살 최대금액" value={settings.orderPolicy.dailyInvestmentLimit} onChange={(value) => setPolicy("dailyInvestmentLimit", value)} suffix="원" min={1} help="오늘 새로 낸 매수 주문의 누적 금액이 이 한도를 넘으면 추가 매수를 막습니다." /><NumberField label="하루 손실 자동정지 기준" value={settings.orderPolicy.dailyMaxLoss} onChange={(value) => setPolicy("dailyMaxLoss", value)} suffix="원" min={1} help="오늘 손익이 이 금액만큼 손실이면 추가 매수를 막습니다." /><NumberField label="동시에 보유할 종목 수" value={settings.orderPolicy.maxPositions} onChange={(value) => setPolicy("maxPositions", value)} suffix="개" min={1} help="보유종목과 아직 체결되지 않은 신규 매수종목을 합친 최대 개수입니다." /><PercentField label="지정가 조정률" valueBps={settings.orderPolicy.limitOffsetBps} onChange={(value) => setPolicy("limitOffsetBps", value)} help="지정가 주문에만 사용합니다. 0%면 현재가 기준이며, 양수는 더 높은 가격으로 조정합니다." /><NumberField label="미체결 주문을 기다릴 시간" value={settings.orderPolicy.unfilledTimeoutSeconds} onChange={(value) => setPolicy("unfilledTimeoutSeconds", value)} suffix="초" min={10} help="이 시간이 지나도 전부 체결되지 않으면 아래 자동취소 설정을 적용합니다." /><Toggle label="시간이 지나면 남은 수량 취소" checked={settings.orderPolicy.cancelRemainderOnTimeout} onChange={(value) => setPolicy("cancelRemainderOnTimeout", value)} help="부분체결된 주문은 체결된 수량을 유지하고 남은 수량만 취소합니다." /></div>
+    <h3>투자금·손실·미체결 안전 한도</h3>
+    <div className="form-grid four">
+      <NumberField label="한 번 살 금액" value={settings.orderPolicy.perTradeBudget} onChange={(value) => setPolicy("perTradeBudget", value)} suffix="원" min={1} help="매수 신호 한 번에 사용할 목표 금액입니다. 현재가로 살 수 있는 정수 수량만 주문합니다." />
+      <Toggle label="잔고에 맞춰 매수금액 줄이기" checked={settings.orderPolicy.sizeToAvailableBudget ?? false} onChange={(value) => setPolicy("sizeToAvailableBudget", value)} help="켜면 한 번 살 금액을 최대한도로 보고 남은 현금과 보유 한도 안에서 살 수 있는 수량을 계산합니다. 하루 손실 제한도 계속 확인합니다." />
+      <NumberField label="한 종목에 넣을 최대금액" value={settings.orderPolicy.perSymbolLimit} onChange={(value) => setPolicy("perSymbolLimit", value)} suffix="원" min={1} help="이미 보유한 금액과 진행 중인 매수 주문을 합쳐 이 금액을 넘지 않게 합니다." />
+      <NumberField label="이 계좌에서 쓸 최대금액" value={settings.orderPolicy.accountInvestmentLimit} onChange={(value) => setPolicy("accountInvestmentLimit", value)} suffix="원" min={1} help="이 증권사 계좌의 전체 보유금액과 진행 중인 매수 주문 합계 한도입니다." />
+      <NumberField label="하루 손실 자동정지 기준" value={settings.orderPolicy.dailyMaxLoss} onChange={(value) => setPolicy("dailyMaxLoss", value)} suffix="원" min={1} help="오늘 손익이 이 금액만큼 손실이면 추가 매수를 막습니다." />
+      <Toggle label="하루 누적매수 금액 제한" checked={dailyInvestmentLimitEnabled} onChange={(value) => setPolicy("dailyInvestmentLimitEnabled", value)} help="끄면 매도한 자금으로 계속 다시 살 수 있습니다. 실제 잔고·보유금액·하루 손실 한도와 증권사 API 속도 제한은 적용됩니다." />
+      {dailyInvestmentLimitEnabled ? <NumberField label="하루 동안 새로 살 최대금액" value={settings.orderPolicy.dailyInvestmentLimit} onChange={(value) => setPolicy("dailyInvestmentLimit", value)} suffix="원" min={1} help="오늘 새로 낸 매수 주문의 누적 금액이 이 한도를 넘으면 추가 매수를 막습니다. 매도한 돈을 재사용해도 누적됩니다." /> : null}
+      <NumberField label="동시에 보유할 종목 수" value={settings.orderPolicy.maxPositions} onChange={(value) => setPolicy("maxPositions", value)} suffix="개" min={1} help="보유종목과 아직 체결되지 않은 신규 매수종목을 합친 최대 개수입니다." />
+      <PercentField label="지정가 조정률" valueBps={settings.orderPolicy.limitOffsetBps} onChange={(value) => setPolicy("limitOffsetBps", value)} help="지정가 주문에만 사용합니다. 0%면 현재가 기준이며, 양수는 더 높은 가격으로 조정합니다. 작은 목표수익보다 큰 조정 폭은 체결 가능성과 실제 매매 결과에 영향을 줍니다." />
+      <NumberField label="미체결 주문을 기다릴 시간" value={settings.orderPolicy.unfilledTimeoutSeconds} onChange={(value) => setPolicy("unfilledTimeoutSeconds", value)} suffix="초" min={10} help="이 시간이 지나도 전부 체결되지 않으면 아래 자동취소 설정을 적용합니다." />
+      <Toggle label="시간이 지나면 남은 수량 취소" checked={settings.orderPolicy.cancelRemainderOnTimeout} onChange={(value) => setPolicy("cancelRemainderOnTimeout", value)} help="부분체결된 주문은 체결된 수량을 유지하고 남은 수량만 취소합니다." />
+    </div>
+    {!dailyInvestmentLimitEnabled ? <p className="form-description budget-guidance">거래 횟수·누적매수 한도 없음 · 매도한 자금 재사용. 실제 잔고·보유한도·하루손실 제한은 유지합니다. 매도 횟수에는 별도 제한이 없습니다.</p> : budgetMultiple !== null ? <p className="form-description budget-guidance">현재 하루 누적 매수 한도는 ‘한 번 살 금액’의 약 {budgetMultiple}회분입니다. 팔아서 생긴 돈을 다시 써도 매수 금액은 하루 합계에 계속 쌓입니다. 실제 거래 횟수는 주문 수량·가격·체결 여부에 따라 달라집니다.</p> : null}
+    <h3>신호 검사·주문·보유 시간</h3>
+    <div className="form-grid four">
+      <NumberField label="신호를 다시 검사할 간격" value={settings.orderPolicy.signalEvaluationSeconds ?? scanIntervalMs / 1000} onChange={(value) => setPolicy("signalEvaluationSeconds", value)} suffix="초" min={1} max={60} step={1} help={`새 시세가 들어오면 이 간격을 기준으로 검사합니다. ${settings.orderPolicy.signalEvaluationSeconds === undefined ? `현재 공통 설정 ${scanIntervalMs / 1000}초를 사용합니다. 숫자를 바꾸면 이 계좌에 따로 적용합니다.` : "간격을 줄여도 시세 수신 속도와 증권사 제한에 따라 실제 검사·체결 시점은 달라집니다."}`} />
+      <NumberField label="다음 주문 시도까지 기다릴 시간" value={settings.orderPolicy.orderRetrySeconds ?? 30} onChange={(value) => setPolicy("orderRetrySeconds", value)} suffix="초" min={5} max={300} step={1} help="같은 종목에 주문을 다시 시도할 최소 간격입니다. 이전 주문이 진행 중이거나 결과를 확인하지 못한 동안에는 기다립니다." />
+      <NumberField label="매도 후 재매수 대기" value={reentryCooldownSeconds(settings.orderPolicy)} onChange={(value) => setPolicy("reentryCooldownSeconds", value)} suffix="초" min={0} max={604800} step={1} help="같은 종목을 전부 판 뒤 기다릴 시간입니다. 이전의 분 단위 설정도 초로 환산해 표시합니다. 0초여도 이전 매수 신호가 끝나고 새 매수 신호가 나와야 다시 삽니다." />
+      <NumberField label="한 종목을 들고 있을 최대시간" value={settings.orderPolicy.maxHoldingMinutes ?? 0} onChange={(value) => setPolicy("maxHoldingMinutes", value)} suffix="분" min={0} max={1440} step={1} help="0분은 시간 제한을 끕니다. 15분이면 보유 후 15분이 지났을 때 손실 중이어도 매도합니다. 주문이 가능한 시점의 시세로 검사합니다." />
+    </div>
     <h3>보유종목 자동매도·재매수</h3>
     <p className="form-description">매수한 뒤에도 보유종목을 계속 검사합니다. 아래에서 켜둔 매도 조건이나 선택한 전략의 매도 신호가 나오면 팔고, 이후 새로운 매수 기회를 다시 찾습니다.</p>
     <div className="form-grid">
     <div className="form-grid four">
       <Toggle label="손실이 커지면 팔기" checked={settings.orderPolicy.stopLossEnabled ?? false} onChange={(value) => setPolicy("stopLossEnabled", value)} help="평균 매수가보다 손절 기준만큼 내려가면 보유 가능 수량을 매도합니다." />
-      <PercentField label="손절 기준 손실률" valueBps={settings.orderPolicy.stopLossBps ?? 300} onChange={(value) => setPolicy("stopLossBps", value)} min={0.01} max={99.99} help="예: 3%면 평균 매수가 대비 수익률이 -3% 이하일 때 매도합니다. 실제 체결가격은 달라질 수 있습니다." />
+      <PercentField label="손절 기준 손실률" valueBps={settings.orderPolicy.stopLossBps ?? 300} onChange={(value) => setPolicy("stopLossBps", value)} min={0.01} max={99.99} help="예: 0.6%면 평균 매수가 대비 가격이 0.6% 이상 내려가면 매도합니다. 예상 비용을 빼기 전 가격 기준이며 실제 체결가격은 달라질 수 있습니다." />
       <Toggle label="목표수익에 도달하면 자동매도" checked={settings.orderPolicy.takeProfitEnabled} onChange={(value) => setPolicy("takeProfitEnabled", value)} help="수익률이 정한 목표에 도달하면 보유 가능 수량을 매도합니다. 수익을 따라가며 팔기도 켜면 먼저 충족된 조건을 적용합니다." />
-      <PercentField label="익절 목표수익률" valueBps={settings.orderPolicy.takeProfitBps} onChange={(value) => setPolicy("takeProfitBps", value)} min={0.01} max={100} help="평균 매수가 대비 현재가 수익률이 이 값 이상이면 보유 가능 수량 전체를 매도 후보로 봅니다. 시장가 체결가격은 달라질 수 있습니다." />
+      <PercentField label={afterCosts ? "예상 비용을 뺀 목표수익률" : "익절 목표수익률"} valueBps={settings.orderPolicy.takeProfitBps} onChange={(value) => setPolicy("takeProfitBps", value)} min={0.01} max={100} help={afterCosts ? `평균 매수가 대비 수익률에서 예상 비용 ${(estimatedCostBps / 100).toFixed(2)}%를 뺀 값으로 목표를 판단합니다. 실제 확정 손익은 체결가격·수수료·세금에 따라 다릅니다.` : "평균 매수가 대비 현재가 수익률이 이 값 이상이면 보유 가능 수량 전체를 매도 후보로 봅니다. 실제 체결가격은 달라질 수 있습니다."} />
+    </div>
+    <div className="form-grid four">
+      <Toggle label="예상 비용을 빼고 익절 판단" checked={afterCosts} onChange={(value) => setPolicy("takeProfitAfterCosts", value)} help="목표수익 익절에만 적용합니다. 평균 매수가 대비 수익률에서 아래 왕복 비용을 뺀 값이 목표에 도달하면 매도합니다." />
+      <PercentField label="예상 왕복 매매 비용" valueBps={estimatedCostBps} onChange={(value) => setPolicy("estimatedRoundTripCostBps", value)} min={0} max={10} help="매수·매도 수수료, 매도 세금, 예상 체결가격 차이를 합한 추정 비율입니다. 0.3%는 예시이며 실제 계좌와 시장의 비용에 맞춰 입력합니다." />
+      {afterCosts && settings.orderPolicy.takeProfitEnabled ? <p className="form-description">현재 가격 기준으로 약 {((settings.orderPolicy.takeProfitBps + estimatedCostBps) / 100).toFixed(2)}% 상승해야 예상 비용을 뺀 목표에 도달합니다. 확정 수익을 보장하는 수치는 아닙니다.</p> : null}
     </div>
     <div className="form-grid four">
       <Toggle label="수익을 따라가며 팔기" checked={settings.orderPolicy.trailingProfitEnabled ?? false} onChange={(value) => setPolicy("trailingProfitEnabled", value)} help="수익이 시작 기준에 도달하면 고점을 기억하고, 그 고점에서 정한 폭만큼 내려왔을 때 매도합니다." />
@@ -547,7 +596,6 @@ function BrokerSettingsPanel({ id, settings, strategies, update, onPresetFilled 
       <Toggle label="오래 제자리면 팔기" checked={settings.orderPolicy.stagnationExitEnabled ?? false} onChange={(value) => setPolicy("stagnationExitEnabled", value)} help="정한 거래일이 지나도 수익률이 아래 기준 이하이면 보유 가능 수량을 매도합니다. 기준보다 잘 오르는 종목은 기간만으로 팔지 않습니다." />
       <NumberField label="제자리인 종목을 기다릴 기간" value={settings.orderPolicy.stagnationTradingDays ?? 5} onChange={(value) => setPolicy("stagnationTradingDays", value)} suffix="거래일" min={1} max={250} step={1} help="매수일과 아직 끝나지 않은 오늘을 제외한 거래일을 셉니다. 주말·휴장일은 빼며, 매수 시점을 확인할 수 있는 보유분에 적용합니다." />
       <PercentField label="제자리로 보는 최대 수익률" valueBps={settings.orderPolicy.stagnationMaxReturnBps ?? 100} onChange={(value) => setPolicy("stagnationMaxReturnBps", value)} min={-100} max={100} help="예: 1%면 기다릴 기간이 지난 뒤 수익률이 1% 이하인 종목을 매도합니다." />
-      <NumberField label="매도 후 재매수 대기" value={settings.orderPolicy.reentryCooldownMinutes ?? 30} onChange={(value) => setPolicy("reentryCooldownMinutes", value)} suffix="분" min={0} max={10080} step={1} help="매도가 체결된 뒤 이 시간 동안 같은 종목을 다시 사지 않습니다. 시간이 지나도 이전 매수 신호가 끝나고 새 매수 신호가 나와야 다시 삽니다." />
     </div>
     </div>
     <h3>{selectedStrategy?.name ?? "매매 전략"} 세부 조건</h3>

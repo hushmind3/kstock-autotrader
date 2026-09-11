@@ -106,7 +106,16 @@ function strategyLabel(strategyId: string): string {
   if (strategyId === "breakout-volume") return "고점 돌파·거래량 전략";
   if (strategyId === "rsi-bollinger-rebound") return "RSI·볼린저 반등 전략";
   if (strategyId === "pullback-rebound") return "눌림 후 반등 매매";
+  if (strategyId === "intraday-momentum") return "실시간 짧은 매매";
   return strategyId;
+}
+
+export function intradayReadinessText(broker: BrokerDashboard): string | null {
+  const intraday = broker.intraday;
+  if (!intraday) return broker.strategyId === "intraday-momentum" ? "짧은 매매 시세 준비 상태를 확인하고 있습니다." : null;
+  if (!intraday.enabled) return null;
+  const progress = `관측 ${intraday.observedSymbols}종목 · 신호 검사 준비 ${intraday.readySymbols}종목`;
+  return `${progress}. 종목마다 최소 ${intraday.requiredSeconds}초의 실제 시세가 필요합니다.${intraday.readySymbols === 0 ? " 시세가 쌓이면 자동으로 검사합니다." : " 준비 완료는 매수 신호나 주문 체결을 뜻하지 않습니다."}`;
 }
 
 function candidateActionLabel(action: string): string {
@@ -147,6 +156,12 @@ function marketRegimeDescription(data: DashboardResponse): string {
 
 function conditionScanHint(data: DashboardResponse | null): string {
   if (!data) return "조건 검사 상태 확인 중";
+  const intraday = data.brokers.filter((broker) => broker.intraday?.enabled);
+  if (intraday.length > 0) {
+    const ready = intraday.reduce((sum, broker) => sum + (broker.intraday?.readySymbols ?? 0), 0);
+    return ready > 0 ? `초단타 ${ready}종목 실시간 검사 중 · 조건이 맞으면 후보 표시`
+      : "초단타 실제 시세 수집 대기 · 저장된 종가만으로 매수 판단하지 않습니다";
+  }
   if (data.market.scanMode === "LAST_SAVED") {
     return `자동매매와 별개로 검사 완료 · 마지막 가격 ${formatDateTime(data.market.lastScanQuoteAt)} 기준`;
   }
@@ -160,6 +175,10 @@ function conditionScanHint(data: DashboardResponse | null): string {
 }
 
 function candidateEmptyCopy(data: DashboardResponse | null): { title: string; detail: string } {
+  if (data?.brokers.some((broker) => broker.intraday?.enabled && broker.intraday.readySymbols === 0)) {
+    return { title: "초단타 실시간 시세를 기다리고 있습니다",
+      detail: "거래 시간이 되면 실제 시세를 모아 자동 검사합니다. 시세 준비 전에는 ‘조건 불충족’으로 처리하지 않습니다." };
+  }
   if (!data || data.market.scanMode === "WAITING_FOR_DATA") {
     return {
       title: "조건 검사를 준비하고 있습니다",
@@ -378,6 +397,7 @@ export function DashboardClient() {
           return <article className="broker-card" key={broker.brokerId}>
             <div className="card-head"><div><p>증권사 계좌</p><h2>{broker.name}</h2></div><span className={`status ${!automationArmed ? "off" : newBuysPaused ? "paused" : "on"}`}>{data ? brokerAutomationLabel(data, broker) : "설정 확인 중"}</span></div>
             <div className={`mode-strip ${broker.environment}`}>{broker.environment === "live" ? "실전투자" : "모의투자"}<span>{broker.maskedAccountId ?? "계좌 미설정"}</span></div>
+            {intradayReadinessText(broker) ? <p className="inline-status">{intradayReadinessText(broker)}</p> : null}
             <dl><div><dt>연결 상태</dt><dd>{connectionLabel[broker.connection.stage]}</dd></div><div><dt>증권사 로그인</dt><dd>{broker.connection.brokerAuthenticated ? "완료" : "대기"}</dd></div><div><dt>계좌잔고 불러오기</dt><dd>{broker.connection.accountSynchronized ? "완료" : "대기"}</dd></div><div><dt>현재 시장 시간</dt><dd>{data ? brokerMarketStatusLabel(data, broker) : "상태 확인 중"}</dd></div><div><dt>실제 주문 상태</dt><dd>{data ? brokerOrderReadiness(data, broker) : "엔진 상태 확인 중"}</dd></div><div><dt>사용 전략</dt><dd>{strategyLabel(broker.strategyId)}</dd></div><div><dt>실시간 가격 감시</dt><dd>{formatNumber(broker.liveSubscriptions)}종목</dd></div></dl>
             <div className="broker-actions">
               <button className="secondary-button" disabled={busy || !broker.enabled} onClick={() => void control(!automationArmed || newBuysPaused ? "start-broker" : "pause-broker", broker.brokerId, broker.environment)}>{!automationArmed || newBuysPaused ? <Play size={15} /> : <CirclePause size={15} />}{brokerAutomationButtonLabel(broker.enabled, automationArmed, newBuysPaused)}</button>

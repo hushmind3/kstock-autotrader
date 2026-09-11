@@ -8,6 +8,7 @@ import type {
   StrategySummary,
 } from "@kstock/shared";
 import { breakoutVolumeStrategy } from "./breakout-volume.js";
+import { intradayMomentumStrategy } from "./intraday-momentum.js";
 import { movingAverageStrategy } from "./moving-average.js";
 import { pullbackReboundStrategy } from "./pullback-rebound.js";
 import { rsiBollingerReboundStrategy } from "./rsi-bollinger-rebound.js";
@@ -49,6 +50,7 @@ export class StrategyRegistry implements StrategyRegistryContract {
     breakoutVolumeStrategy,
     rsiBollingerReboundStrategy,
     pullbackReboundStrategy,
+    intradayMomentumStrategy,
   ]) {
     for (const strategy of initialStrategies) this.register(strategy);
   }

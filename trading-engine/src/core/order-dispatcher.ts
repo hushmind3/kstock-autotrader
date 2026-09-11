@@ -51,6 +51,8 @@ export class OrderDispatcher {
       side,
       symbol: input.signal.symbol,
       quote: input.quote,
+      ...(side === "sell" && typeof input.signal.metrics.minimumSellPrice === "number"
+        ? { minimumSellPrice: input.signal.metrics.minimumSellPrice } : {}),
     });
     if (!risk.allowed) return { submitted: false, reasonCodes: risk.reasonCodes };
 
@@ -85,7 +87,9 @@ export class OrderDispatcher {
               reservation: {
                 budgetKey: `daily:${tradingDate}`,
                 amount: risk.reservationAmount,
-                maximumActiveAmount: Math.max(
+                maximumActiveAmount: input.brokerSettings.orderPolicy.dailyInvestmentLimitEnabled === false
+                  ? input.brokerSettings.orderPolicy.accountInvestmentLimit
+                  : Math.max(
                   0,
                   input.brokerSettings.orderPolicy.dailyInvestmentLimit -
                     input.riskContext.dailyInvestedAmount,

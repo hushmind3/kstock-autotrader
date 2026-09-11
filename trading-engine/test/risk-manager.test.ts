@@ -27,6 +27,22 @@ const quote: Quote = {
 };
 
 describe("RiskManager", () => {
+  it("recycles capital beyond daily turnover limits while retaining loss and cash gates", () => {
+    const settings = createDefaultSettings();
+    Object.assign(settings, { emergencyHalt: false, globalAutoTradingEnabled: true, newBuysPaused: false });
+    const brokerSettings = settings.brokers.kiwoom;
+    Object.assign(brokerSettings, { enabled: true, autoTradingEnabled: true, newBuysPaused: false });
+    Object.assign(brokerSettings.orderPolicy, { dailyInvestmentLimitEnabled: false, sizeToAvailableBudget: true, estimatedRoundTripCostBps: 30 });
+    const input = { appSettings: settings, brokerSettings, health: connected, side: "buy" as const,
+      symbol: "005930", quote, positions: [], openOrders: [], dailyInvestedAmount: 1000000000,
+      dailyTotalPnl: 0, reservedAmount: 0, availableCash: 1000000, instrumentBuyAllowed: true,
+      instrumentRestrictionCodes: [], marketOpen: true, now: new Date("2026-08-31T01:00:01Z") };
+    expect(new RiskManager().check(input).allowed).toBe(true);
+    expect(new RiskManager().check({ ...input, availableCash: 0 }).allowed).toBe(false);
+    expect(new RiskManager().check({ ...input, dailyTotalPnl: -brokerSettings.orderPolicy.dailyMaxLoss }).allowed).toBe(false);
+    brokerSettings.orderPolicy.dailyInvestmentLimitEnabled = true;
+    expect(new RiskManager().check(input).allowed).toBe(false);
+  });
   it("does not allow a real buy merely because cash was deposited", () => {
     const settings = createDefaultSettings();
     const decision = new RiskManager().check({

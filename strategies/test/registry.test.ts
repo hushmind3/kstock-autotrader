@@ -9,6 +9,7 @@ describe("StrategyRegistry metadata", () => {
       "breakout-volume",
       "rsi-bollinger-rebound",
       "pullback-rebound",
+      "intraday-momentum",
     ]);
     for (const strategy of strategies) {
       expect(strategy.description.length).toBeGreaterThan(0);

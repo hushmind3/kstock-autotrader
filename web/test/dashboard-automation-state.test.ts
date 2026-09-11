@@ -14,8 +14,23 @@ import {
   brokerOrderReadiness,
   isBrokerAutomationArmed,
   isBrokerNewBuyPaused,
+  intradayReadinessText,
 } from "../components/dashboard-client";
 import type { BrokerDashboard, DashboardResponse } from "../lib/api-types";
+
+describe("실시간 짧은 매매 준비 표시", () => {
+  it("기존 계좌에는 새 준비 상태를 만들어 표시하지 않는다", () => {
+    expect(intradayReadinessText(broker())).toBeNull();
+  });
+
+  it("초기 시세 수집과 준비된 종목 수를 구분한다", () => {
+    const observing = { ...broker(), strategyId: "intraday-momentum", intraday: { enabled: true, observedSymbols: 12, readySymbols: 0, requiredSeconds: 60 } };
+    expect(intradayReadinessText(observing)).toContain("관측 12종목 · 신호 검사 준비 0종목");
+    expect(intradayReadinessText(observing)).toContain("최소 60초");
+    expect(intradayReadinessText(observing)).toContain("시세가 쌓이면 자동으로 검사");
+    expect(intradayReadinessText({ ...observing, intraday: { ...observing.intraday, readySymbols: 4 } })).toContain("준비 완료는 매수 신호나 주문 체결을 뜻하지 않습니다");
+  });
+});
 
 function dashboard(
   state: DashboardResponse["market"]["session"]["state"] = "OPEN",

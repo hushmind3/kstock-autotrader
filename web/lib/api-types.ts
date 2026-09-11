@@ -110,6 +110,12 @@ export interface BrokerDashboard {
   marketStatusConfirmed: boolean;
   orderWindowOpen: boolean;
   lastError: string | null;
+  intraday?: {
+    enabled: boolean;
+    observedSymbols: number;
+    readySymbols: number;
+    requiredSeconds: number;
+  };
 }
 
 export type BrokerConnectionStage =
@@ -470,6 +476,12 @@ export interface BrokerSettings {
     limitOffsetBps: number;
     takeProfitEnabled: boolean;
     takeProfitBps: number;
+    orderRetrySeconds?: number;
+    signalEvaluationSeconds?: number;
+    reentryCooldownSeconds?: number;
+    estimatedRoundTripCostBps?: number;
+    takeProfitAfterCosts?: boolean;
+    maxHoldingMinutes?: number;
     stopLossEnabled?: boolean;
     stopLossBps?: number;
     trailingProfitEnabled?: boolean;
@@ -483,6 +495,8 @@ export interface BrokerSettings {
     perSymbolLimit: number;
     accountInvestmentLimit: number;
     dailyInvestmentLimit: number;
+    dailyInvestmentLimitEnabled?: boolean;
+    sizeToAvailableBudget?: boolean;
     dailyMaxLoss: number;
     maxPositions: number;
     unfilledTimeoutSeconds: number;

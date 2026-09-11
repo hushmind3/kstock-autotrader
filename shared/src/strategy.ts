@@ -6,6 +6,13 @@ export interface StrategyRequirements {
   minimumDailyBars: number;
   needsCurrentPrice: boolean;
   needsCumulativeVolume: boolean;
+  intradayWindowSeconds?: number;
+}
+
+export interface IntradayTradeSample {
+  observedAt: string;
+  price: number;
+  cumulativeVolume: number;
 }
 
 export interface StrategyMarketSnapshot {
@@ -13,6 +20,7 @@ export interface StrategyMarketSnapshot {
   completedDailyBars: DailyBar[];
   quote: Quote | null;
   hasPosition: boolean;
+  recentTradeSamples?: IntradayTradeSample[];
 }
 
 export interface StrategyDecision {

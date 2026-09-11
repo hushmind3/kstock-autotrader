@@ -15,6 +15,8 @@ export function positionExitPolicyKey(policy: OrderPolicy): string {
     trailingActivationBps: policy.trailingActivationBps, trailingDrawdownBps: policy.trailingDrawdownBps,
     stagnationExitEnabled: policy.stagnationExitEnabled,
     stagnationTradingDays: policy.stagnationTradingDays, stagnationMaxReturnBps: policy.stagnationMaxReturnBps,
+    estimatedRoundTripCostBps: policy.estimatedRoundTripCostBps,
+    takeProfitAfterCosts: policy.takeProfitAfterCosts, maxHoldingMinutes: policy.maxHoldingMinutes,
   });
 }
 
@@ -25,6 +27,7 @@ export interface PositionExitPolicyInput {
   /** Persisted peak of quotes observed during this position, never the day's high. */
   peakPrice?: number;
   completedHoldingSessions?: number;
+  heldForMs?: number;
 }
 
 /**
@@ -50,11 +53,14 @@ export function evaluatePositionExitPolicy(
   const rawReturnBps =
     ((quote.price - position.averagePrice) / position.averagePrice) * 10_000;
   const positionReturnBps = Math.round(rawReturnBps);
+  const estimatedNetReturnBps = rawReturnBps - orderPolicy.estimatedRoundTripCostBps;
   const metrics: StrategyDecision["metrics"] = {
     currentPrice: quote.price,
     averagePrice: position.averagePrice,
     positionReturnBps,
     accountExitPolicy: true,
+    estimatedNetReturnBps: Math.round(estimatedNetReturnBps),
+    estimatedRoundTripCostBps: orderPolicy.estimatedRoundTripCostBps,
   };
   if (orderPolicy.stopLossEnabled && rawReturnBps <= -orderPolicy.stopLossBps) {
     return {
@@ -63,11 +69,17 @@ export function evaluatePositionExitPolicy(
       metrics: { ...metrics, stopLossBps: orderPolicy.stopLossBps },
     };
   }
-  if (orderPolicy.takeProfitEnabled && rawReturnBps >= orderPolicy.takeProfitBps) {
+  const profitBasisBps = orderPolicy.takeProfitAfterCosts ? estimatedNetReturnBps : rawReturnBps;
+  if (orderPolicy.takeProfitEnabled && profitBasisBps >= orderPolicy.takeProfitBps) {
     return {
       action: "SELL",
-      reasonCodes: ["TAKE_PROFIT_TARGET_REACHED"],
-      metrics: { ...metrics, takeProfitTargetBps: orderPolicy.takeProfitBps },
+      reasonCodes: [orderPolicy.takeProfitAfterCosts ? "NET_PROFIT_TARGET_REACHED" : "TAKE_PROFIT_TARGET_REACHED"],
+      metrics: {
+        ...metrics, takeProfitTargetBps: orderPolicy.takeProfitBps,
+        ...(orderPolicy.takeProfitAfterCosts ? {
+          minimumSellPrice: position.averagePrice * (1 + (orderPolicy.takeProfitBps + orderPolicy.estimatedRoundTripCostBps) / 10_000),
+        } : {}),
+      },
     };
   }
   const peak = input.peakPrice;
@@ -89,6 +101,16 @@ export function evaluatePositionExitPolicy(
         },
       };
     }
+  }
+  if (
+    orderPolicy.maxHoldingMinutes > 0 &&
+    input.heldForMs !== undefined && Number.isFinite(input.heldForMs) &&
+    input.heldForMs >= orderPolicy.maxHoldingMinutes * 60_000
+  ) {
+    return {
+      action: "SELL", reasonCodes: ["MAX_HOLDING_TIME_REACHED"],
+      metrics: { ...metrics, heldMinutes: Math.floor(input.heldForMs / 60_000) },
+    };
   }
   if (
     orderPolicy.stagnationExitEnabled &&

@@ -51,6 +51,7 @@ import {
 import { OrderDispatcher } from "./order-dispatcher.js";
 import { evaluatePositionExitPolicy, positionExitPolicyKey } from "./exit-policy.js";
 import { PositionLifecycle, verifiedQuoteObservedAt } from "./position-lifecycle.js";
+import { IntradayTape } from "./intraday-tape.js";
 import { MarketDataService, type MarketRuntimeView } from "../services/market-data-service.js";
 import { DerivativesRuntime } from "../derivatives/runtime.js";
 
@@ -59,6 +60,7 @@ interface BrokerRuntime {
   settings: BrokerRuntimeSettings;
   strategyConfigId: string;
   requiredDailyBars: number;
+  intradayWindowSeconds: number;
   reconciled: boolean;
   recovering: boolean;
   marketStatusConfirmedDate: string | null;
@@ -435,6 +437,9 @@ export class TradingEngine {
   readonly #strategyRegistry = new StrategyRegistry();
   readonly #orderDispatcher: OrderDispatcher;
   readonly #positionLifecycle: PositionLifecycle;
+  readonly #intradayTape: IntradayTape;
+  readonly #intradayFocus = new Map<string, { selectedAt: number; symbols: string[] }>();
+  readonly #intradayReadiness = new Map<string, { evaluatedAt: number; ready: boolean }>();
   readonly #marketClock = new MarketClock();
   readonly #instanceId = randomUUID();
   readonly #runtimes = new Map<BrokerId, BrokerRuntime>();
@@ -479,6 +484,7 @@ export class TradingEngine {
     this.#marketSession = this.#marketClock.current();
     this.#orderDispatcher = new OrderDispatcher(this.#repository);
     this.#positionLifecycle = new PositionLifecycle(this.#repository);
+    this.#intradayTape = new IntradayTape(this.#repository);
     this.#marketData = new MarketDataService(this.#repository, {
       getRuntimes: () => this.marketRuntimes(),
       getQuoteSweepIntervalMs: () => this.#settings.quoteSweepIntervalMs,
@@ -600,6 +606,7 @@ export class TradingEngine {
       }),
     );
     this.#runtimes.clear();
+    this.#intradayTape.flush();
     this.#repository.releaseEngineLease("trading-engine", this.#instanceId);
     this.#repository.appendAudit({ actor: "trading-engine", action: "ENGINE_STOPPED" });
   }
@@ -1507,6 +1514,7 @@ export class TradingEngine {
         settings,
         strategyConfigId,
         requiredDailyBars: strategy.requirements(validatedConfig).minimumDailyBars,
+        intradayWindowSeconds: strategy.requirements(validatedConfig).intradayWindowSeconds ?? 0,
         reconciled: false,
         // Keep dispatch fail-closed until account reconciliation and durable
         // outbox recovery have both completed.
@@ -1865,6 +1873,11 @@ export class TradingEngine {
   private handleBrokerEvent(runtime: BrokerRuntime, event: BrokerEvent): void {
     try {
       if (event.type === "quote") {
+        if (this.isRuntimeOrderWindowOpen(runtime.adapter) &&
+          event.quote.source === runtime.adapter.scope.brokerId &&
+          event.quote.exchange === this.orderRoute(runtime.settings)) {
+          this.#intradayTape.observe(runtime.adapter.scope, event.quote);
+        }
         void this.#marketData.handleRealtimeQuote(runtime.adapter, event.quote);
       } else if (event.type === "order") {
         const previous = this.#repository.findOrderByBrokerId(runtime.adapter.scope, event.order.brokerOrderId);
@@ -1955,6 +1968,7 @@ export class TradingEngine {
       } else if (event.type === "health") {
         this.#repository.appendHealthEvent(runtime.adapter.scope, event.health);
         if (event.health.state !== "CONNECTED") {
+          if (!event.health.marketWebSocketConnected) this.#intradayTape.resetScope(runtime.adapter.scope);
           runtime.reconciled = false;
           runtime.marketStatusConfirmedDate = null;
           if (runtime.adapter.scope.brokerId === "kiwoom") {
@@ -2029,7 +2043,8 @@ export class TradingEngine {
     if (
       !snapshotOnly &&
       previousEvaluation !== undefined &&
-      evaluationTime - previousEvaluation < this.#settings.scanIntervalMs
+      evaluationTime - previousEvaluation < (runtime.settings.orderPolicy.signalEvaluationSeconds === undefined
+        ? this.#settings.scanIntervalMs : runtime.settings.orderPolicy.signalEvaluationSeconds * 1_000)
     ) return;
     if (!snapshotOnly) this.#lastEvaluatedAt.set(key, evaluationTime);
     this.#evaluating.add(key);
@@ -2056,25 +2071,31 @@ export class TradingEngine {
           : reason === "TAKE_PROFIT_TARGET_REACHED" ? exitPolicy.takeProfitEnabled
             : reason === "TRAILING_PROFIT_TRIGGERED" ? exitPolicy.trailingProfitEnabled
               : reason === "STAGNATION_EXIT_TRIGGERED" ? exitPolicy.stagnationExitEnabled
+                : reason === "MAX_HOLDING_TIME_REACHED" ? exitPolicy.maxHoldingMinutes > 0
                 : false);
-      const accountExitDecision = (position?.quantity ?? 0) > 0 && latchStillEnabled
-        ? latchedExit!
-        : evaluatePositionExitPolicy({
+      const freshExitDecision = evaluatePositionExitPolicy({
         position,
         quote,
         orderPolicy: exitPolicy,
         ...(cycle?.peakPrice ? { peakPrice: cycle.peakPrice } : {}),
         ...(cycle?.openedAt ? {
           completedHoldingSessions: this.#marketClock.completedHoldingSessions(cycle.openedAt, new Date(quote.receivedAt)),
+          heldForMs: Date.parse(verifiedQuoteObservedAt(quote) ?? quote.receivedAt) - Date.parse(cycle.openedAt),
         } : {}),
       });
+      // A previous profit exit must never delay a new stop/time exit. Net-profit
+      // exits are rechecked at the current price rather than latched across a fall.
+      const urgentExit = freshExitDecision?.reasonCodes.some((reason) =>
+        reason === "STOP_LOSS_TRIGGERED" || reason === "MAX_HOLDING_TIME_REACHED");
+      const accountExitDecision = urgentExit ? freshExitDecision
+        : (position?.quantity ?? 0) > 0 && latchStillEnabled ? latchedExit! : freshExitDecision;
       if (canObservePosition) {
         this.#positionLifecycle.rememberExit(adapter.scope, quote.symbol, accountExitDecision, exitPolicyKey);
       }
       if (accountExitDecision) {
         decision = accountExitDecision;
       } else {
-        if (!this.#marketData.isDailyBarsReady(quote.symbol)) return;
+        if (runtime.requiredDailyBars > 0 && !this.#marketData.isDailyBarsReady(quote.symbol)) return;
         const strategy = this.#strategyRegistry.get(runtime.settings.strategyId);
         config = strategy.validateConfig(runtime.settings.strategyConfig);
         bars = this.#repository.listDailyBars(quote.symbol, {
@@ -2086,14 +2107,24 @@ export class TradingEngine {
             completedDailyBars: bars,
             quote,
             hasPosition: (position?.quantity ?? 0) > 0,
+            ...(runtime.intradayWindowSeconds > 0 ? {
+              recentTradeSamples: snapshotOnly ? [] : this.#intradayTape.samples(
+                adapter.scope, this.orderRoute(runtime.settings), quote.symbol,
+                new Date(evaluationTime), runtime.intradayWindowSeconds,
+              ),
+            } : {}),
           },
           config,
         );
       }
+      if (runtime.intradayWindowSeconds > 0 && !snapshotOnly) {
+        this.#intradayReadiness.set(key, { evaluatedAt: evaluationTime, ready: decision.action !== "NOT_READY" });
+      }
       if ((position?.quantity ?? 0) <= 0) {
         decision = this.#positionLifecycle.filterReentry(
           adapter.scope, quote.symbol, decision,
-          exitPolicy.reentryCooldownMinutes, verifiedQuoteObservedAt(quote) ?? quote.receivedAt, canObservePosition,
+          exitPolicy.reentryCooldownSeconds === undefined ? exitPolicy.reentryCooldownMinutes : exitPolicy.reentryCooldownSeconds / 60,
+          verifiedQuoteObservedAt(quote) ?? quote.receivedAt, canObservePosition,
         );
       }
       if (!snapshotOnly) this.#lastActions.set(key, decision.action);
@@ -2105,7 +2136,7 @@ export class TradingEngine {
           action: decision.action,
           receivedAt: quote.receivedAt,
           metrics: decision.metrics,
-          attemptWindow: Math.floor(evaluationTime / 30_000),
+          attemptWindow: Math.floor(evaluationTime / (exitPolicy.orderRetrySeconds * 1_000)),
         }).slice(0, 48)}`;
         const name = this.#repository.getInstrument(quote.symbol)?.name ?? "";
         this.#candidates.set(key, {
@@ -2126,7 +2157,7 @@ export class TradingEngine {
         if (
           canObservePosition &&
           !activeOrder &&
-          evaluationTime - lastAttemptAt >= 30_000
+          evaluationTime - lastAttemptAt >= exitPolicy.orderRetrySeconds * 1_000
         ) {
           // A canceled remainder or recovered connection must not leave an
           // unchanged SELL/BUY signal asleep forever. Re-evaluate at a bounded
@@ -2146,7 +2177,7 @@ export class TradingEngine {
               config,
               accountExitPolicy: accountExitDecision !== null,
               positionAveragePrice: position?.averagePrice ?? null,
-              attemptWindow: Math.floor(evaluationTime / 30_000),
+              attemptWindow: Math.floor(evaluationTime / (exitPolicy.orderRetrySeconds * 1_000)),
             }),
             observedAt: quote.receivedAt,
           });
@@ -2278,6 +2309,21 @@ export class TradingEngine {
     const positions = this.#repository.listPositions(scope).map((row) => row.symbol);
     const orders = this.#repository.listOpenOrders(scope).map((row) => row.symbol);
     const candidates = [...this.#candidates.values()].filter((row) => scopeKey(row.scope) === scopeKey(scope));
+    const runtime = this.#runtimes.get(scope.brokerId);
+    if (runtime && runtime.intradayWindowSeconds > 0) {
+      const focusKey = scopeKey(scope);
+      let focus = this.#intradayFocus.get(focusKey);
+      if (!focus || focus.symbols.length === 0 || Date.now() - focus.selectedAt >= 300_000) {
+        const route = this.orderRoute(runtime.settings);
+        const quotes = this.#repository.listLatestQuotes(scope.brokerId)
+          .filter((quote) => quote.exchange === route && Number.isFinite(quote.price) && quote.price > 0 &&
+            quote.cumulativeVolume > 0 && isInstrumentBuyAllowed(this.#repository.getInstrument(quote.symbol)))
+          .sort((a, b) => b.price * b.cumulativeVolume - a.price * a.cumulativeVolume || a.symbol.localeCompare(b.symbol));
+        focus = { selectedAt: Date.now(), symbols: quotes.slice(0, runtime.adapter.capabilities.maxQuoteSubscriptions).map((quote) => quote.symbol) };
+        this.#intradayFocus.set(focusKey, focus);
+      }
+      return [...new Set([...positions, ...orders, "005930", ...focus.symbols])];
+    }
     return [
       "005930",
       ...positions,
@@ -2318,6 +2364,7 @@ export class TradingEngine {
       const route = this.orderRoute(runtime.settings);
       if (didOrderRouteWindowChange(previous, current, route)) {
         runtime.marketStatusConfirmedDate = null;
+        this.#intradayTape.resetScope(runtime.adapter.scope);
       }
     }
   }
@@ -2497,6 +2544,8 @@ export class TradingEngine {
     const credential = await this.safeCredentialStatus(brokerId, settings.environment);
     const health = runtime ? this.runtimeHealth(runtime) : null;
     const connection = this.brokerConnection(brokerId, credential.configured);
+    const intradaySymbols = runtime && runtime.intradayWindowSeconds > 0
+      ? this.prioritySymbols(runtime.adapter.scope).slice(0, runtime.adapter.capabilities.maxQuoteSubscriptions) : [];
     return {
       brokerId,
       name: BROKER_NAMES[brokerId],
@@ -2507,6 +2556,17 @@ export class TradingEngine {
       credentialsConfigured: credential.configured,
       maskedAccountId: credential.maskedAccountId,
       strategyId: settings.strategyId,
+      intraday: {
+        enabled: (runtime?.intradayWindowSeconds ?? 0) > 0,
+        requiredSeconds: runtime?.intradayWindowSeconds ?? 0,
+        observedSymbols: runtime ? intradaySymbols.filter((symbol) => this.#intradayTape.samples(
+          runtime.adapter.scope, this.orderRoute(settings), symbol, new Date(), runtime.intradayWindowSeconds,
+        ).length > 0).length : 0,
+        readySymbols: runtime ? intradaySymbols.filter((symbol) => {
+          const status = this.#intradayReadiness.get(candidateKey(runtime.adapter.scope, symbol));
+          return status?.ready && Date.now() - status.evaluatedAt < 10_000;
+        }).length : 0,
+      },
       orderRoute: settings.orderRoute,
       resumeAfterRestart: settings.resumeAfterRestart,
       orderWindowOpen: runtime ? this.isRuntimeOrderWindowOpen(runtime.adapter) : false,

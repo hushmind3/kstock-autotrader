@@ -24,6 +24,22 @@ const quote: Quote = {
 };
 
 describe("account take-profit exit policy", () => {
+  it("requires profit after estimated costs and provides a minimum profit limit price", () => {
+    const orderPolicy = createDefaultSettings().brokers.kiwoom.orderPolicy;
+    Object.assign(orderPolicy, { takeProfitEnabled: true, takeProfitAfterCosts: true, takeProfitBps: 20, estimatedRoundTripCostBps: 30 });
+    expect(evaluatePositionExitPolicy({ position, quote: { ...quote, price: 10040 }, orderPolicy })).toBeNull();
+    expect(evaluatePositionExitPolicy({ position, quote: { ...quote, price: 10051 }, orderPolicy })).toMatchObject({
+      action: "SELL", reasonCodes: ["NET_PROFIT_TARGET_REACHED"],
+    });
+  });
+  it("exits at a configured minute limit without waiting for daily bars", () => {
+    const orderPolicy = createDefaultSettings().brokers.kiwoom.orderPolicy;
+    orderPolicy.maxHoldingMinutes = 15;
+    expect(evaluatePositionExitPolicy({ position, quote, orderPolicy, heldForMs: 899999 })).toBeNull();
+    expect(evaluatePositionExitPolicy({ position, quote, orderPolicy, heldForMs: 900000 })).toMatchObject({
+      action: "SELL", reasonCodes: ["MAX_HOLDING_TIME_REACHED"],
+    });
+  });
   it("is disabled by default and preserves existing live behavior", () => {
     const orderPolicy = createDefaultSettings().brokers.kiwoom.orderPolicy;
     expect(evaluatePositionExitPolicy({ position, quote, orderPolicy })).toBeNull();
