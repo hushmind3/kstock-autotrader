@@ -257,6 +257,24 @@ export class MarketClock {
     throw new Error("No preceding trading date was found in the calendar window");
   }
 
+  completedHoldingSessions(openedAt: string, now: Date): number {
+    const opened = new Date(openedAt);
+    if (!Number.isFinite(opened.getTime()) || !Number.isFinite(now.getTime()) || opened >= now) return 0;
+    const firstDate = ymd(koreanParts(opened));
+    const today = ymd(koreanParts(now));
+    let candidate = new Date(`${firstDate}T12:00:00+09:00`);
+    let count = 0;
+    // Do not count the partial acquisition day or the current unfinished day.
+    // A bounded window exceeds the maximum configurable 250-session horizon.
+    for (let offset = 0; offset < 3_660; offset += 1) {
+      candidate = plusDays(candidate, 1);
+      const date = ymd(koreanParts(candidate));
+      if (date >= today) break;
+      if (this.#isTradingDate(date)) count += 1;
+    }
+    return count;
+  }
+
   applyBrokerStatus(
     state: Exclude<MarketSessionState, "HOLIDAY">,
     observedAt: string,

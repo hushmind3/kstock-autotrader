@@ -116,7 +116,7 @@ export class RiskManager {
       failures.push("QUOTE_ROUTE_MISMATCH");
     }
     if (input.quote.price <= 0) failures.push("INVALID_PRICE");
-    if (input.openOrders.some((order) => order.symbol === input.symbol && order.side === input.side)) {
+    if (input.openOrders.some((order) => order.symbol === input.symbol)) {
       failures.push("ACTIVE_ORDER_EXISTS");
     }
 
@@ -153,6 +153,7 @@ export class RiskManager {
     if (input.appSettings.newBuysPaused || input.brokerSettings.newBuysPaused) {
       failures.push("NEW_BUYS_PAUSED");
     }
+    if (position && position.quantity > 0) failures.push("POSITION_ALREADY_HELD");
     if (input.marketRegimeBuyAllowed === false) {
       failures.push(input.marketRegimeReasonCode ?? "MARKET_REGIME_BLOCKED");
     }

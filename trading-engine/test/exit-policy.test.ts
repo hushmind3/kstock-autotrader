@@ -47,4 +47,43 @@ describe("account take-profit exit policy", () => {
     expect(evaluatePositionExitPolicy({ position, quote, orderPolicy })).toBeNull();
     expect(evaluatePositionExitPolicy({ position: null, quote, orderPolicy })).toBeNull();
   });
+
+  it("sells at the loss boundary independently of fixed take profit", () => {
+    const orderPolicy = createDefaultSettings().brokers.kiwoom.orderPolicy;
+    orderPolicy.stopLossEnabled = true;
+    orderPolicy.stopLossBps = 300;
+    expect(evaluatePositionExitPolicy({ position, quote: { ...quote, price: 9_700 }, orderPolicy }))
+      .toMatchObject({ action: "SELL", reasonCodes: ["STOP_LOSS_TRIGGERED"] });
+    expect(evaluatePositionExitPolicy({ position, quote: { ...quote, price: 9_701 }, orderPolicy })).toBeNull();
+  });
+
+  it("uses only the position peak and waits for activation plus a sufficient drawdown", () => {
+    const orderPolicy = createDefaultSettings().brokers.kiwoom.orderPolicy;
+    orderPolicy.trailingProfitEnabled = true;
+    expect(evaluatePositionExitPolicy({ position, quote: { ...quote, price: 10_000, high: 50_000 }, orderPolicy })).toBeNull();
+    expect(evaluatePositionExitPolicy({ position, quote: { ...quote, price: 10_000 }, peakPrice: 10_200, orderPolicy })).toBeNull();
+    expect(evaluatePositionExitPolicy({ position, quote: { ...quote, price: 10_136 }, peakPrice: 10_300, orderPolicy }))
+      .toMatchObject({ action: "SELL", reasonCodes: ["TRAILING_PROFIT_TRIGGERED"] });
+    expect(evaluatePositionExitPolicy({ position, quote: { ...quote, price: 10_200 }, peakPrice: 10_300, orderPolicy })).toBeNull();
+  });
+
+  it("ages out only stagnant holdings and lets profitable trends continue", () => {
+    const orderPolicy = createDefaultSettings().brokers.kiwoom.orderPolicy;
+    orderPolicy.stagnationExitEnabled = true;
+    const flatQuote = { ...quote, price: 10_100 };
+    expect(evaluatePositionExitPolicy({ position, quote: flatQuote, orderPolicy, completedHoldingSessions: 4 })).toBeNull();
+    expect(evaluatePositionExitPolicy({ position, quote: flatQuote, orderPolicy, completedHoldingSessions: 5 }))
+      .toMatchObject({ action: "SELL", reasonCodes: ["STAGNATION_EXIT_TRIGGERED"] });
+    expect(evaluatePositionExitPolicy({ position, quote, orderPolicy, completedHoldingSessions: 50 })).toBeNull();
+    expect(evaluatePositionExitPolicy({ position, quote: flatQuote, orderPolicy })).toBeNull();
+  });
+
+  it("does not emit an exit from invalid prices", () => {
+    const orderPolicy = createDefaultSettings().brokers.kiwoom.orderPolicy;
+    orderPolicy.takeProfitEnabled = true;
+    orderPolicy.stopLossEnabled = true;
+    for (const price of [Number.NaN, Infinity, 0, -1]) {
+      expect(evaluatePositionExitPolicy({ position, quote: { ...quote, price }, orderPolicy })).toBeNull();
+    }
+  });
 });

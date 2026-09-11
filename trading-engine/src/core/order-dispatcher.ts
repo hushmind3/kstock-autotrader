@@ -62,6 +62,9 @@ export class OrderDispatcher {
       symbol: input.signal.symbol,
       side,
       automated: true,
+      // One signal is one logical order. A daily key would wrongly suppress
+      // later entries and confirmed-cancellation retries in the same session.
+      signalId: input.signal.id,
     });
     const intentId = randomUUID();
     const orderId = randomUUID();

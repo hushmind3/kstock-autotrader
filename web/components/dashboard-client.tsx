@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { AlertCircle, Ban, CirclePause, Play, RefreshCw, ShieldAlert } from "lucide-react";
 import { formatDateTime, formatNumber, formatWon, getJson } from "@/lib/client-api";
+import { tradeReasonSummary } from "../lib/trade-reasons";
 import type {
   BrokerConnectionStage,
   BrokerDashboard,
@@ -104,6 +105,7 @@ function strategyLabel(strategyId: string): string {
   if (strategyId === "moving-average") return "이동평균선 전략";
   if (strategyId === "breakout-volume") return "고점 돌파·거래량 전략";
   if (strategyId === "rsi-bollinger-rebound") return "RSI·볼린저 반등 전략";
+  if (strategyId === "pullback-rebound") return "눌림 후 반등 매매";
   return strategyId;
 }
 
@@ -389,7 +391,7 @@ export function DashboardClient() {
 
       <section className="split-grid">
         <DataCard title="현재 매수·매도 후보" kicker="조건 검사 결과" href="/orders">
-          {filtered.candidates.length === 0 ? <Empty title={emptyCandidateCopy.title} detail={emptyCandidateCopy.detail} /> : <div className="compact-list">{filtered.candidates.slice(0, 8).map((row) => <div key={row.id}><span className={`side ${row.action.toLowerCase()}`}>{candidateActionLabel(row.action)}</span><strong>{row.name || row.symbol}<small>{brokerLabel[row.brokerId]} · {row.symbol} · {row.source === "LIVE" ? "실시간 가격" : "마지막 저장 가격"}</small></strong><b>{formatWon(row.price)}</b></div>)}</div>}
+          {filtered.candidates.length === 0 ? <Empty title={emptyCandidateCopy.title} detail={emptyCandidateCopy.detail} /> : <div className="compact-list">{filtered.candidates.slice(0, 8).map((row) => <div key={row.id}><span className={`side ${row.action.toLowerCase()}`}>{candidateActionLabel(row.action)}</span><strong>{row.name || row.symbol}<small>{brokerLabel[row.brokerId]} · {row.symbol} · {row.source === "LIVE" ? "실시간 가격" : "마지막 저장 가격"}</small>{tradeReasonSummary(row.reasonCodes) ? <small>{tradeReasonSummary(row.reasonCodes)}</small> : null}</strong><b>{formatWon(row.price)}</b></div>)}</div>}
         </DataCard>
         <DataCard title="최근 체결" kicker="실제 체결 내역" href="/orders">
           {filtered.executions.length === 0 ? <Empty title="오늘 체결 내역이 없습니다" /> : <div className="compact-list">{filtered.executions.slice(0, 8).map((row) => <div key={row.id}><span className={`side ${row.side}`}>{row.side === "buy" ? "매수" : "매도"}</span><strong>{row.name || row.symbol}<small>{formatDateTime(row.executedAt)} · {row.quantity}주</small></strong><b>{formatWon(row.price)}</b></div>)}</div>}

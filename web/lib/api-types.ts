@@ -470,6 +470,15 @@ export interface BrokerSettings {
     limitOffsetBps: number;
     takeProfitEnabled: boolean;
     takeProfitBps: number;
+    stopLossEnabled?: boolean;
+    stopLossBps?: number;
+    trailingProfitEnabled?: boolean;
+    trailingActivationBps?: number;
+    trailingDrawdownBps?: number;
+    stagnationExitEnabled?: boolean;
+    stagnationTradingDays?: number;
+    stagnationMaxReturnBps?: number;
+    reentryCooldownMinutes?: number;
     perTradeBudget: number;
     perSymbolLimit: number;
     accountInvestmentLimit: number;

@@ -49,7 +49,8 @@ import {
   type BrokerConnectionReadiness,
 } from "./broker-connection.js";
 import { OrderDispatcher } from "./order-dispatcher.js";
-import { evaluatePositionExitPolicy } from "./exit-policy.js";
+import { evaluatePositionExitPolicy, positionExitPolicyKey } from "./exit-policy.js";
+import { PositionLifecycle, verifiedQuoteObservedAt } from "./position-lifecycle.js";
 import { MarketDataService, type MarketRuntimeView } from "../services/market-data-service.js";
 import { DerivativesRuntime } from "../derivatives/runtime.js";
 
@@ -65,6 +66,7 @@ interface BrokerRuntime {
   orderTail: Promise<void>;
   reconcileTimer: NodeJS.Timeout | null;
   reconcilePromise: Promise<void> | null;
+  accountEventVersion: number;
 }
 
 interface CandidateState {
@@ -432,6 +434,7 @@ export class TradingEngine {
   readonly #derivativeAdapterFactory: DerivativeAdapterFactory | undefined;
   readonly #strategyRegistry = new StrategyRegistry();
   readonly #orderDispatcher: OrderDispatcher;
+  readonly #positionLifecycle: PositionLifecycle;
   readonly #marketClock = new MarketClock();
   readonly #instanceId = randomUUID();
   readonly #runtimes = new Map<BrokerId, BrokerRuntime>();
@@ -475,6 +478,7 @@ export class TradingEngine {
     }
     this.#marketSession = this.#marketClock.current();
     this.#orderDispatcher = new OrderDispatcher(this.#repository);
+    this.#positionLifecycle = new PositionLifecycle(this.#repository);
     this.#marketData = new MarketDataService(this.#repository, {
       getRuntimes: () => this.marketRuntimes(),
       getQuoteSweepIntervalMs: () => this.#settings.quoteSweepIntervalMs,
@@ -1512,6 +1516,7 @@ export class TradingEngine {
         orderTail: Promise.resolve(),
         reconcileTimer: null,
         reconcilePromise: null,
+        accountEventVersion: 0,
       };
       runtime.unsubscribe = adapter.onEvent((event) => this.handleBrokerEvent(runtime, event));
       this.#runtimes.set(brokerId, runtime);
@@ -1642,6 +1647,8 @@ export class TradingEngine {
 
   private async reconcileRuntimeOnce(runtime: BrokerRuntime): Promise<void> {
     let reconciliationFailed = false;
+    let ledgerChangedDuringFetch = false;
+    const accountEventVersion = runtime.accountEventVersion;
     const scope = runtime.adapter.scope;
     const tradingDate = koreanTradingDate();
     const fromDate = scope.brokerId === "koreainvestment"
@@ -1670,11 +1677,13 @@ export class TradingEngine {
       totalEvaluation: snapshot.totalEvaluation,
     });
     for (const order of snapshot.openOrders) {
-      this.#repository.upsertReconciledOrder({ scope, brokerOrder: order });
+      const previous = this.#repository.findOrderByBrokerId(scope, order.brokerOrderId);
+      const current = this.#repository.upsertReconciledOrder({ scope, brokerOrder: order });
+      if (current.filledQuantity > (previous?.filledQuantity ?? 0)) ledgerChangedDuringFetch = true;
     }
     for (const execution of executions) {
       try {
-        this.#repository.recordExecution({ scope, execution });
+        if (this.#repository.recordExecution({ scope, execution }).inserted) ledgerChangedDuringFetch = true;
       } catch (error) {
         reconciliationFailed = true;
         this.recordError(error, `execution-reconcile:${execution.executionId}`, scope);
@@ -1692,7 +1701,12 @@ export class TradingEngine {
       try {
         const history = await runtime.adapter.fetchOrderHistory(fromDate);
         for (const order of history) {
-          this.#repository.upsertReconciledOrder({ scope, brokerOrder: order });
+          const previous = this.#repository.findOrderByBrokerId(scope, order.brokerOrderId);
+          const current = this.#repository.upsertReconciledOrder({ scope, brokerOrder: order });
+          if (current.filledQuantity > (previous?.filledQuantity ?? 0) ||
+            (current.status !== previous?.status && ["FILLED", "CANCELED", "REJECTED"].includes(current.status))) {
+            ledgerChangedDuringFetch = true;
+          }
         }
         // Cancellation requests have their own broker order number. Resolve a
         // missing original order only when history explicitly confirms that
@@ -1707,6 +1721,8 @@ export class TradingEngine {
             (candidate) => candidate.brokerOrderId === cancellation.originalBrokerOrderId,
           );
           if (!original?.brokerOrderId) continue;
+          const previous = this.#repository.getOrder(original.id, scope);
+          if (previous?.status !== "CANCELED") ledgerChangedDuringFetch = true;
           this.#repository.upsertReconciledOrder({
             scope,
             brokerOrder: {
@@ -1765,9 +1781,24 @@ export class TradingEngine {
     const blocked = this.#repository.listOutbox({ scope, statuses: ["BLOCKED", "FAILED"], limit: 1 }).length > 0;
     runtime.reconciled =
       !reconciliationFailed &&
+      !ledgerChangedDuringFetch &&
+      runtime.accountEventVersion === accountEventVersion &&
       !unresolved &&
       !blocked &&
       runtime.adapter.getHealth().state === "CONNECTED";
+    if (runtime.reconciled) {
+      this.#positionLifecycle.synchronize(
+        scope,
+        snapshot.positions,
+        this.#repository.listFills(scope, { limit: 20_000 }),
+        snapshot.fetchedAt,
+      );
+    } else if (ledgerChangedDuringFetch || runtime.accountEventVersion !== accountEventVersion) {
+      // Parallel account/history reads are not an atomic broker snapshot. If a
+      // new fill or terminal order was discovered, obtain another balance after
+      // that observation before releasing the retry gate.
+      this.scheduleReconcile(runtime);
+    }
     this.#repository.appendHealthEvent(scope, this.runtimeHealth(runtime));
   }
 
@@ -1836,9 +1867,21 @@ export class TradingEngine {
       if (event.type === "quote") {
         void this.#marketData.handleRealtimeQuote(runtime.adapter, event.quote);
       } else if (event.type === "order") {
-        this.#repository.upsertReconciledOrder({ scope: runtime.adapter.scope, brokerOrder: event.order });
+        const previous = this.#repository.findOrderByBrokerId(runtime.adapter.scope, event.order.brokerOrderId);
+        const current = this.#repository.upsertReconciledOrder({ scope: runtime.adapter.scope, brokerOrder: event.order });
+        if (
+          current.filledQuantity > (previous?.filledQuantity ?? 0) ||
+          (current.status !== previous?.status && ["FILLED", "CANCELED", "REJECTED"].includes(current.status))
+        ) {
+          // Order notifications may precede executions. Never retry against the
+          // old balance merely because an order has disappeared from open orders.
+          runtime.accountEventVersion += 1;
+          runtime.reconciled = false;
+          this.scheduleReconcile(runtime);
+        }
       } else if (event.type === "execution") {
         if (!runtime.reconciled) {
+          runtime.accountEventVersion += 1;
           this.scheduleReconcile(runtime);
           return;
         }
@@ -1852,6 +1895,7 @@ export class TradingEngine {
         // back into ACCOUNT_SYNCING. A genuinely new fill still fails closed
         // until the authoritative account snapshot catches up.
         if (recorded.inserted) {
+          runtime.accountEventVersion += 1;
           runtime.reconciled = false;
           this.scheduleReconcile(runtime);
         }
@@ -1861,6 +1905,7 @@ export class TradingEngine {
           event.position.symbol,
         );
         if (positionLedgerChanged(current, event.position)) {
+          runtime.accountEventVersion += 1;
           runtime.reconciled = false;
           this.scheduleReconcile(runtime);
         }
@@ -1970,6 +2015,12 @@ export class TradingEngine {
       this.confirmOrderWindowFromQuote(runtime, quote);
       if (!this.isRuntimeOrderWindowOpen(adapter)) return;
       if (quote.stale === true) return;
+      const quoteAge = Date.now() - Date.parse(quote.receivedAt);
+      if (!Number.isFinite(quoteAge) || quoteAge < -5_000 || quoteAge > this.#settings.staleQuoteMs) return;
+      if (
+        (quote.source === "kiwoom" || quote.brokerTimestampVerified === true) &&
+        !isFreshVerifiedBrokerQuote(quote, new Date(), this.#settings.staleQuoteMs)
+      ) return;
     }
     const key = candidateKey(adapter.scope, quote.symbol);
     if (this.#evaluating.has(key)) return;
@@ -1993,11 +2044,33 @@ export class TradingEngine {
       let bars = [] as ReturnType<TradingRepository["listDailyBars"]>;
       let config: unknown = null;
       let decision: StrategyDecision;
-      const accountExitDecision = evaluatePositionExitPolicy({
+      const canObservePosition = !snapshotOnly && runtime.reconciled && !runtime.recovering;
+      const cycle = canObservePosition
+        ? this.#positionLifecycle.observeQuote(adapter.scope, quote)
+        : this.#positionLifecycle.get(adapter.scope, quote.symbol);
+      const exitPolicy = runtime.settings.orderPolicy;
+      const exitPolicyKey = positionExitPolicyKey(exitPolicy);
+      const latchedExit = cycle?.exitPolicyKey === exitPolicyKey ? cycle.exitDecision : null;
+      const latchStillEnabled = latchedExit?.reasonCodes.some((reason) =>
+        reason === "STOP_LOSS_TRIGGERED" ? exitPolicy.stopLossEnabled
+          : reason === "TAKE_PROFIT_TARGET_REACHED" ? exitPolicy.takeProfitEnabled
+            : reason === "TRAILING_PROFIT_TRIGGERED" ? exitPolicy.trailingProfitEnabled
+              : reason === "STAGNATION_EXIT_TRIGGERED" ? exitPolicy.stagnationExitEnabled
+                : false);
+      const accountExitDecision = (position?.quantity ?? 0) > 0 && latchStillEnabled
+        ? latchedExit!
+        : evaluatePositionExitPolicy({
         position,
         quote,
-        orderPolicy: runtime.settings.orderPolicy,
+        orderPolicy: exitPolicy,
+        ...(cycle?.peakPrice ? { peakPrice: cycle.peakPrice } : {}),
+        ...(cycle?.openedAt ? {
+          completedHoldingSessions: this.#marketClock.completedHoldingSessions(cycle.openedAt, new Date(quote.receivedAt)),
+        } : {}),
       });
+      if (canObservePosition) {
+        this.#positionLifecycle.rememberExit(adapter.scope, quote.symbol, accountExitDecision, exitPolicyKey);
+      }
       if (accountExitDecision) {
         decision = accountExitDecision;
       } else {
@@ -2017,7 +2090,12 @@ export class TradingEngine {
           config,
         );
       }
-      const previousAction = snapshotOnly ? undefined : this.#lastActions.get(key);
+      if ((position?.quantity ?? 0) <= 0) {
+        decision = this.#positionLifecycle.filterReentry(
+          adapter.scope, quote.symbol, decision,
+          exitPolicy.reentryCooldownMinutes, verifiedQuoteObservedAt(quote) ?? quote.receivedAt, canObservePosition,
+        );
+      }
       if (!snapshotOnly) this.#lastActions.set(key, decision.action);
       if (decision.action === "BUY" || decision.action === "SELL") {
         const signalId = `signal-${stableHash({
@@ -2027,6 +2105,7 @@ export class TradingEngine {
           action: decision.action,
           receivedAt: quote.receivedAt,
           metrics: decision.metrics,
+          attemptWindow: Math.floor(evaluationTime / 30_000),
         }).slice(0, 48)}`;
         const name = this.#repository.getInstrument(quote.symbol)?.name ?? "";
         this.#candidates.set(key, {
@@ -2040,7 +2119,19 @@ export class TradingEngine {
           generatedAt: quote.receivedAt,
           source: snapshotOnly ? "LAST_SAVED" : "LIVE",
         });
-        if (!snapshotOnly && previousAction !== decision.action) {
+        const attemptKey = `automatic-order-attempt:${quote.symbol}`;
+        const lastAttemptAt = this.#repository.getRuntimeState<number>(adapter.scope, attemptKey) ?? 0;
+        const activeOrder = this.#repository.listOpenOrders(adapter.scope)
+          .some((order) => order.symbol === quote.symbol);
+        if (
+          canObservePosition &&
+          !activeOrder &&
+          evaluationTime - lastAttemptAt >= 30_000
+        ) {
+          // A canceled remainder or recovered connection must not leave an
+          // unchanged SELL/BUY signal asleep forever. Re-evaluate at a bounded
+          // rate; active-order and intent guards still prevent duplicate sends.
+          this.#repository.setRuntimeState(adapter.scope, attemptKey, evaluationTime);
           const inserted = this.#repository.insertSignal({
             id: signalId,
             scope: adapter.scope,
@@ -2055,6 +2146,7 @@ export class TradingEngine {
               config,
               accountExitPolicy: accountExitDecision !== null,
               positionAveragePrice: position?.averagePrice ?? null,
+              attemptWindow: Math.floor(evaluationTime / 30_000),
             }),
             observedAt: quote.receivedAt,
           });

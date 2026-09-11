@@ -95,10 +95,11 @@ export const KIS_MULTI_QUOTE_BATCH_SIZE = 30;
 
 export type KisWebSocketUnsubscribeTrType = "0" | "2";
 
-// Current domestic-stock examples document "0", while another official shared
-// websocket helper sends "2". This remains configurable per account environment.
+// The official examples_user/kis_auth.py unsubscribe() sends "2". Some endpoint
+// docstrings say "0", but that value is rejected by the live websocket gateway.
+// Retain the explicit compatibility override for environments that require it.
 export const DEFAULT_KIS_WS_UNSUBSCRIBE_TR_TYPE: KisWebSocketUnsubscribeTrType =
-  "0";
+  "2";
 
 export function defaultRequestsPerSecond(
   environment: TradingEnvironment,

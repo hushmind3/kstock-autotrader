@@ -9,6 +9,7 @@ import type {
 } from "@kstock/shared";
 import { breakoutVolumeStrategy } from "./breakout-volume.js";
 import { movingAverageStrategy } from "./moving-average.js";
+import { pullbackReboundStrategy } from "./pullback-rebound.js";
 import { rsiBollingerReboundStrategy } from "./rsi-bollinger-rebound.js";
 
 function configRecord(value: unknown): Record<string, StrategyConfigValue> {
@@ -47,6 +48,7 @@ export class StrategyRegistry implements StrategyRegistryContract {
     movingAverageStrategy,
     breakoutVolumeStrategy,
     rsiBollingerReboundStrategy,
+    pullbackReboundStrategy,
   ]) {
     for (const strategy of initialStrategies) this.register(strategy);
   }
