@@ -254,7 +254,7 @@ export function SettingsClient() {
                 description={!status.configured ? "처음 한 번 API 정보와 계좌를 입력하세요." : connection.lastError ? `연결 확인 필요: ${connection.message}` : connection.stage === "READY" ? "연결 준비 완료 · 계좌나 API 정보를 바꿀 때만 여세요." : connection.message}>
                 <CredentialCard id={id} environment={broker.environment} status={status} connection={connection.environment === broker.environment ? connection : null} market={brokerMarketView(dashboard, broker.orderRoute)} reload={load} />
               </SettingsDetails>
-              <BrokerSettingsPanel id={id} settings={broker} strategies={payload.strategies} scanIntervalMs={payload.settings.scanIntervalMs} update={(updater) => updateBroker(id, updater)} onPresetFilled={(presetName) => { setMessage(null); setPresetNotice(`${brokerNames[id]}의 ${presetName} 조건을 화면에 채웠습니다. 위의 ‘설정 저장’을 눌러야 적용됩니다.`); }} />
+              <SimpleBrokerSettingsPanel id={id} settings={broker} update={(updater) => updateBroker(id, updater)} />
             </section>;
           })()}
         </>
@@ -509,6 +509,30 @@ function ReadinessItem({ label, complete, failed, pending }: {
   pending: string;
 }) {
   return <div><span>{label}</span><b className={complete ? "complete" : failed ? "failed" : "pending"}>{complete ? "완료" : failed ? "확인 필요" : pending}</b></div>;
+}
+
+export function SimpleBrokerSettingsPanel({ id, settings, update }: {
+  id: BrokerId;
+  settings: BrokerSettings;
+  update: (updater: (value: BrokerSettings) => BrokerSettings) => void;
+}) {
+  const setPolicy = <K extends keyof BrokerSettings["orderPolicy"]>(key: K, value: BrokerSettings["orderPolicy"][K]) =>
+    update((current) => ({ ...current, orderPolicy: { ...current.orderPolicy, [key]: value } }));
+  const running = settings.enabled && settings.autoTradingEnabled;
+  return <section className="settings-card simple-trading-settings">
+    <div className="simple-trading-head">
+      <div><p className="settings-kicker">자동사냥식 자동매매</p><h2>{brokerNames[id]}</h2></div>
+      <strong className={running ? "positive" : "negative"}>{running ? "자동으로 계속 운용 중" : "자동운용 꺼짐"}</strong>
+    </div>
+    <p className="simple-trading-flow">종목 찾기 → 매수 → 오르는 동안 보유 → 흐름이 꺾이거나 손실이 커지면 매도 → 다시 종목 찾기</p>
+    <p className="form-description">매일 다시 누를 필요 없습니다. 계좌 연결과 잔고를 확인한 뒤 거래 가능한 시간에 알아서 반복합니다.</p>
+    <div className="form-grid three simple-money-fields">
+      <NumberField label="이 계좌에서 굴릴 돈" value={settings.orderPolicy.accountInvestmentLimit} onChange={(value) => setPolicy("accountInvestmentLimit", value)} suffix="원" min={1} help="이 금액 안에서 여러 종목을 사고팝니다." />
+      <NumberField label="한 종목을 살 때 쓸 돈" value={settings.orderPolicy.perTradeBudget} onChange={(value) => setPolicy("perTradeBudget", value)} suffix="원" min={1} help="한 번 매수할 때 사용할 금액입니다." />
+      <NumberField label="오늘 이만큼 잃으면 새 매수 멈춤" value={settings.orderPolicy.dailyMaxLoss} onChange={(value) => setPolicy("dailyMaxLoss", value)} suffix="원" min={1} help="보유종목 매도는 계속하고 새 종목만 더 사지 않습니다." />
+    </div>
+    <p className="simple-trading-note">세금·수수료·예상 체결 차이를 뺀 결과를 확인합니다. 작은 고정수익에 도달했다는 이유만으로 바로 팔지 않으며, 수익 중인 종목은 시간만으로 정리하지 않습니다.</p>
+  </section>;
 }
 
 export function BrokerSettingsPanel({ id, settings, strategies, scanIntervalMs, update, onPresetFilled }: { id: BrokerId; settings: BrokerSettings; strategies: SettingsResponse["strategies"]; scanIntervalMs: number; update: (updater: (value: BrokerSettings) => BrokerSettings) => void; onPresetFilled: (presetName: string) => void }) {

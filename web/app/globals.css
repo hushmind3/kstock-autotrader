@@ -270,6 +270,15 @@ td small { margin-top: 3px; color: var(--quiet); font-size: 9px; }
 .settings-rule-copy p { margin: 0 0 9px; }
 .settings-rule-copy strong { display: block; color: var(--text); font-weight: 650; }
 .settings-rule-copy small { font-size: 12px; }
+.simple-trading-settings { overflow: hidden; }
+.simple-trading-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.simple-trading-head h2 { margin: 0; }
+.simple-trading-head > strong { font-size: 13px; white-space: nowrap; }
+.simple-trading-flow { margin: 18px 0 8px; padding: 14px; border-radius: 9px; background: rgba(67,211,158,.07); color: var(--text); font-size: 14px; font-weight: 650; line-height: 1.65; }
+.simple-money-fields { margin-top: 18px; }
+.simple-trading-settings .form-description,
+.simple-trading-settings .field em { font-size: 12px; line-height: 1.6; }
+.simple-trading-note { margin: 16px 0 0; color: var(--muted); font-size: 12px; line-height: 1.65; }
 .safety-card { display: flex; align-items: center; justify-content: space-between; gap: 22px; }
 .settings-kicker { margin: 0 0 6px; color: var(--accent); font-size: 9px; font-weight: 850; letter-spacing: .15em; }
 .safety-card > div > span, .credential-title p { display: block; margin-top: 6px; color: var(--muted); font-size: 11px; }
