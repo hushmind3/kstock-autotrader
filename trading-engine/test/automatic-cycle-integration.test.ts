@@ -20,6 +20,8 @@ import {
 } from "@kstock/shared";
 import { TradingEngine, type CredentialStorePort } from "../src/core/trading-engine.js";
 import { OrderDispatcher } from "../src/core/order-dispatcher.js";
+import { PositionLifecycle } from "../src/core/position-lifecycle.js";
+import { positionExitPolicyKey } from "../src/core/exit-policy.js";
 
 const scope = { brokerId: "kiwoom", environment: "live", accountId: "memory-cycle-account" } as const;
 const symbol = "005930";
@@ -232,6 +234,24 @@ afterEach(async () => {
 });
 
 describe("automatic account-exit integration", () => {
+  it("rechecks a conditional time exit after a profit recovery instead of reusing the old sell decision", async () => {
+    const adapter = await startMemoryEngine((settings) => {
+      Object.assign(settings.brokers.kiwoom.orderPolicy, { takeProfitEnabled: false, maxHoldingMinutes: 15,
+        timedExitOnlyWithoutNetProfit: true, estimatedRoundTripCostBps: 30 });
+    });
+    const lifecycle = new PositionLifecycle(repository!);
+    lifecycle.rememberExit(scope, symbol, { action: "SELL", reasonCodes: ["MAX_HOLDING_TIME_REACHED"], metrics: {} },
+      positionExitPolicyKey(engine!.settings.brokers.kiwoom.orderPolicy));
+    vi.setSystemTime(sessionStart + 16 * 60000);
+    adapter.emitQuote(10500);
+    await setImmediate();
+    await setImmediate();
+    expect(lifecycle.get(scope, symbol)?.exitDecision).toBeNull();
+    expect(adapter.placeOrder).not.toHaveBeenCalled();
+    vi.setSystemTime(sessionStart + 16 * 60000 + 5000);
+    adapter.emitQuote(10020);
+    await vi.waitFor(() => expect(adapter.placeOrder).toHaveBeenCalledOnce());
+  });
   it("submits a stop-loss sell from a fresh quote despite a weak market buy gate and missing strategy history", async () => {
     const adapter = await startMemoryEngine((settings) => {
       settings.brokers.kiwoom.orderPolicy.stopLossEnabled = true;

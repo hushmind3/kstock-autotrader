@@ -31,6 +31,7 @@ export function withAutoTradingPreset(
       signalEvaluationSeconds: undefined,
       takeProfitAfterCosts: false,
       maxHoldingMinutes: 0,
+      timedExitOnlyWithoutNetProfit: false,
     },
   };
 }
@@ -59,13 +60,13 @@ export function withIntradayTradingPreset(
       reentryCooldownMinutes: 0,
       estimatedRoundTripCostBps: 30,
       takeProfitAfterCosts: true,
-      takeProfitEnabled: true,
-      takeProfitBps: 20,
+      takeProfitEnabled: false,
       stopLossEnabled: true,
       stopLossBps: 60,
       trailingProfitEnabled: false,
       stagnationExitEnabled: false,
       maxHoldingMinutes: 15,
+      timedExitOnlyWithoutNetProfit: true,
     },
   };
 }

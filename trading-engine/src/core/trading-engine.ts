@@ -2071,7 +2071,7 @@ export class TradingEngine {
           : reason === "TAKE_PROFIT_TARGET_REACHED" ? exitPolicy.takeProfitEnabled
             : reason === "TRAILING_PROFIT_TRIGGERED" ? exitPolicy.trailingProfitEnabled
               : reason === "STAGNATION_EXIT_TRIGGERED" ? exitPolicy.stagnationExitEnabled
-                : reason === "MAX_HOLDING_TIME_REACHED" ? exitPolicy.maxHoldingMinutes > 0
+                : reason === "MAX_HOLDING_TIME_REACHED" ? exitPolicy.maxHoldingMinutes > 0 && !exitPolicy.timedExitOnlyWithoutNetProfit
                 : false);
       const freshExitDecision = evaluatePositionExitPolicy({
         position,
@@ -2084,7 +2084,7 @@ export class TradingEngine {
         } : {}),
       });
       // A previous profit exit must never delay a new stop/time exit. Net-profit
-      // exits are rechecked at the current price rather than latched across a fall.
+      // exits and conditional time exits are rechecked at the current price.
       const urgentExit = freshExitDecision?.reasonCodes.some((reason) =>
         reason === "STOP_LOSS_TRIGGERED" || reason === "MAX_HOLDING_TIME_REACHED");
       const accountExitDecision = urgentExit ? freshExitDecision

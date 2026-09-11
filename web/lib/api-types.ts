@@ -482,6 +482,7 @@ export interface BrokerSettings {
     estimatedRoundTripCostBps?: number;
     takeProfitAfterCosts?: boolean;
     maxHoldingMinutes?: number;
+    timedExitOnlyWithoutNetProfit?: boolean;
     stopLossEnabled?: boolean;
     stopLossBps?: number;
     trailingProfitEnabled?: boolean;

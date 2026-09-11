@@ -21,6 +21,7 @@ export const OrderPolicySchema = z.object({
   estimatedRoundTripCostBps: z.number().int().min(0).max(1_000).default(0),
   takeProfitAfterCosts: z.boolean().default(false),
   maxHoldingMinutes: z.number().int().min(0).max(1_440).default(0),
+  timedExitOnlyWithoutNetProfit: z.boolean().default(false),
   sizeToAvailableBudget: z.boolean().default(false),
   perTradeBudget: z.number().int().positive().default(500_000),
   perSymbolLimit: z.number().int().positive().default(1_000_000),

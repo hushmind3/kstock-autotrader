@@ -24,6 +24,20 @@ const quote: Quote = {
 };
 
 describe("account take-profit exit policy", () => {
+  it("does not cut profitable positions just because the holding timer expired", () => {
+    const orderPolicy = createDefaultSettings().brokers.kiwoom.orderPolicy;
+    Object.assign(orderPolicy, { takeProfitEnabled: false, maxHoldingMinutes: 15,
+      timedExitOnlyWithoutNetProfit: true, estimatedRoundTripCostBps: 30, stopLossEnabled: true, stopLossBps: 60 });
+    for (const price of [10051, 10500, 11000]) {
+      expect(evaluatePositionExitPolicy({ position, quote: { ...quote, price }, orderPolicy, heldForMs: 3600000 })).toBeNull();
+    }
+    for (const price of [10000, 10020, 10030]) {
+      expect(evaluatePositionExitPolicy({ position, quote: { ...quote, price }, orderPolicy, heldForMs: 900000 }))
+        .toMatchObject({ action: "SELL", reasonCodes: ["MAX_HOLDING_TIME_REACHED"] });
+    }
+    expect(evaluatePositionExitPolicy({ position, quote: { ...quote, price: 9900 }, orderPolicy, heldForMs: 1000 }))
+      .toMatchObject({ action: "SELL", reasonCodes: ["STOP_LOSS_TRIGGERED"] });
+  });
   it("requires profit after estimated costs and provides a minimum profit limit price", () => {
     const orderPolicy = createDefaultSettings().brokers.kiwoom.orderPolicy;
     Object.assign(orderPolicy, { takeProfitEnabled: true, takeProfitAfterCosts: true, takeProfitBps: 20, estimatedRoundTripCostBps: 30 });

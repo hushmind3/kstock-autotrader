@@ -17,6 +17,7 @@ export function positionExitPolicyKey(policy: OrderPolicy): string {
     stagnationTradingDays: policy.stagnationTradingDays, stagnationMaxReturnBps: policy.stagnationMaxReturnBps,
     estimatedRoundTripCostBps: policy.estimatedRoundTripCostBps,
     takeProfitAfterCosts: policy.takeProfitAfterCosts, maxHoldingMinutes: policy.maxHoldingMinutes,
+    timedExitOnlyWithoutNetProfit: policy.timedExitOnlyWithoutNetProfit,
   });
 }
 
@@ -105,11 +106,13 @@ export function evaluatePositionExitPolicy(
   if (
     orderPolicy.maxHoldingMinutes > 0 &&
     input.heldForMs !== undefined && Number.isFinite(input.heldForMs) &&
-    input.heldForMs >= orderPolicy.maxHoldingMinutes * 60_000
+    input.heldForMs >= orderPolicy.maxHoldingMinutes * 60_000 &&
+    (!orderPolicy.timedExitOnlyWithoutNetProfit || estimatedNetReturnBps <= 1e-8)
   ) {
     return {
       action: "SELL", reasonCodes: ["MAX_HOLDING_TIME_REACHED"],
-      metrics: { ...metrics, heldMinutes: Math.floor(input.heldForMs / 60_000) },
+      metrics: { ...metrics, heldMinutes: Math.floor(input.heldForMs / 60_000),
+        timedExitOnlyWithoutNetProfit: orderPolicy.timedExitOnlyWithoutNetProfit },
     };
   }
   if (
