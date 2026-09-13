@@ -277,6 +277,15 @@ td small { margin-top: 3px; color: var(--quiet); font-size: 9px; }
 .settings-visible-section .field em,
 .settings-visible-section .toggle em { font-size: 11px; line-height: 1.55; }
 .settings-visible-section > .form-description:first-of-type { margin-top: 0; }
+.broker-settings-form > .settings-visible-section { margin-top: 12px; padding: 18px; border: 1px solid var(--line); border-radius: 10px; background: rgba(0,0,0,.08); }
+.broker-settings-form .settings-visible-heading h3 { margin: 0; color: var(--text); font-size: 15px; }
+.broker-settings-form .settings-rule-copy { margin-bottom: 0; }
+.broker-settings-form .field > span { color: var(--muted); font-size: 12px; }
+.broker-settings-form .field-help { font-size: 11px; line-height: 1.55; }
+.toggle-row.broker-connection-toggles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); justify-content: stretch; gap: 10px; margin: 0 0 12px; }
+.broker-connection-toggles .toggle { min-height: 44px; justify-content: flex-start; border: 1px solid var(--line-soft); border-radius: 8px; padding: 10px 12px; background: var(--bg); }
+.broker-settings-form .toggle-guidance { margin: 0 0 16px; }
+.broker-settings-form .toggle-guidance > span { font-size: 11px; line-height: 1.55; }
 .safety-card { display: flex; align-items: center; justify-content: space-between; gap: 22px; }
 .settings-kicker { margin: 0 0 6px; color: var(--accent); font-size: 9px; font-weight: 850; letter-spacing: .15em; }
 .safety-card > div > span, .credential-title p { display: block; margin-top: 6px; color: var(--muted); font-size: 11px; }
@@ -405,6 +414,7 @@ td small { margin-top: 3px; color: var(--quiet); font-size: 9px; }
   .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .market-session-strip { grid-template-columns: 1fr; }
   .market-session-strip > p { grid-column: auto; }
+  .broker-settings-form .form-grid.four { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .toggle-guidance.four { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 760px) {
@@ -453,6 +463,7 @@ td small { margin-top: 3px; color: var(--quiet); font-size: 9px; }
   .trade-guide-heading { flex-direction: column; }
   .toggle-guidance { grid-template-columns: 1fr; }
   .toggle-guidance.four { grid-template-columns: 1fr; }
+  .toggle-row.broker-connection-toggles { grid-template-columns: 1fr; }
   .settings-tabs { display: flex; overflow-x: auto; scrollbar-width: thin; }
   .settings-tabs button { flex: 1 0 auto; min-width: 105px; }
   .credential-collapsed-actions button { flex: 1 1 160px; min-height: 42px; }

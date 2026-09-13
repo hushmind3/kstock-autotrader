@@ -551,13 +551,13 @@ export function BrokerSettingsPanel({ id, settings, strategies, scanIntervalMs, 
     set("resumeAfterRestart", value);
   };
 
-  return <section className="settings-card form-section"><div className="form-heading"><div><p className="settings-kicker">계좌별 운용 설정</p><h2>{brokerNames[id]}</h2><p className="form-description">금액·규칙을 바꿀 때만 저장하면 됩니다. 매일 다시 설정할 필요는 없습니다. <Link href="/">운용 상태 보기·정지</Link></p></div></div>
+  return <section className="settings-card form-section broker-settings-form"><div className="form-heading"><div><p className="settings-kicker">계좌별 운용 설정</p><h2>{brokerNames[id]}</h2><p className="form-description">금액·규칙을 바꿀 때만 저장하면 됩니다. 매일 다시 설정할 필요는 없습니다. <Link href="/">운용 상태 보기·정지</Link></p></div></div>
     <div className="settings-overview" aria-label="현재 계좌 설정 요약">
       <span>매매 방식 <strong>{selectedStrategy?.name ?? settings.strategyId}</strong></span>
       <span>하루 누적매수 <strong>{dailyInvestmentLimitEnabled ? `${settings.orderPolicy.dailyInvestmentLimit.toLocaleString("ko-KR")}원 한도` : "제한 없음"}</strong></span>
       <span>재시작 후 이어가기 <strong>{settings.resumeAfterRestart ? "켜짐" : "꺼짐"}</strong></span>
     </div>
-    <h3>사용할 돈</h3>
+    <SettingsSection title="사용할 돈" description="계좌 전체·한 종목·하루 손실 금액을 정합니다.">
     <div className="form-grid three">
       <NumberField label="이 계좌에서 쓸 최대금액" value={settings.orderPolicy.accountInvestmentLimit} onChange={(value) => setPolicy("accountInvestmentLimit", value)} suffix="원" min={1} help="보유금액과 진행 중인 매수 주문의 합계 한도입니다." />
       <NumberField label="한 번 살 금액" value={settings.orderPolicy.perTradeBudget} onChange={(value) => setPolicy("perTradeBudget", value)} suffix="원" min={1} help="매수 한 번에 사용할 금액입니다." />
@@ -568,8 +568,9 @@ export function BrokerSettingsPanel({ id, settings, strategies, scanIntervalMs, 
       <p><strong>언제 파나요?</strong>{rules.sell}</p>
       <small>현재 입력값을 설명합니다. 수정한 내용은 ‘설정 저장’ 후 적용됩니다.</small>
     </div>
+    </SettingsSection>
     <SettingsSection title="계좌·시장·매매 방식" description="어느 계좌와 시장에서 어떤 방식으로 주문할지 정합니다.">
-    <div className="toggle-row"><Toggle label="이 계좌 연결 사용" checked={settings.enabled} onChange={(value) => set("enabled", value)} /><Toggle label="재시작 뒤 자동으로 계속" checked={settings.resumeAfterRestart} onChange={changeResumeAfterRestart} /></div>
+    <div className="toggle-row broker-connection-toggles"><Toggle label="이 계좌 연결 사용" checked={settings.enabled} onChange={(value) => set("enabled", value)} /><Toggle label="재시작 뒤 자동으로 계속" checked={settings.resumeAfterRestart} onChange={changeResumeAfterRestart} /></div>
     <div className="toggle-guidance"><span><strong>이 계좌 연결 사용</strong>을 끄면 이 증권사 API에 접속하지 않습니다.</span><span><strong>재시작 뒤 자동으로 계속</strong>을 켜두면 장 마감이나 서버 재시작 뒤에도 마지막 자동운용 상태를 이어갑니다. 안전 확인이 끝나기 전에는 주문하지 않습니다.</span><span><strong>운용 ON/OFF는 설정 저장으로 바뀌지 않습니다.</strong> 오래 열어둔 화면이 자동매매 상태를 되돌리는 일을 막았습니다.</span></div>
     <div className="form-grid four"><SelectField label="사용할 계좌 종류" value={settings.environment} onChange={(value) => set("environment", value as "live" | "paper")} options={[{ value: "paper", label: "모의투자 계좌" }, { value: "live", label: "실전투자 계좌" }]} danger={settings.environment === "live"} help="실전투자는 실제 돈으로 주문합니다. 바꾼 뒤 해당 환경의 API 키를 연결해야 합니다." /><SelectField label="주문을 보낼 시장" value={settings.orderRoute} onChange={(value) => set("orderRoute", value as BrokerSettings["orderRoute"])} options={[{ value: "KRX", label: "한국거래소만(KRX)" }, { value: "NXT", label: "넥스트레이드 직접(NXT 지원종목만)" }, { value: "SOR", label: "증권사가 자동 선택(SOR·추천)" }]} help="자동 선택(SOR)은 증권사가 KRX와 NXT 중 가능한 시장으로 보냅니다. NXT 직접 주문은 NXT 지원종목에만 가능하며, 지원하지 않는 종목은 증권사가 거절합니다. 조건검사는 자동매매가 꺼져 있어도 계속됩니다." /><SelectField label="매매 조건" value={settings.strategyId} onChange={changeStrategy} options={strategies.map((strategy) => ({ value: strategy.id, label: `${strategy.name} (${strategy.version}판)` }))} help="어떤 계산 규칙으로 매수·매도 후보를 찾을지 선택합니다. 선택하면 아래 숫자가 해당 전략의 기본값으로 바뀝니다." /><SelectField label="주문 가격 방식" value={settings.orderPolicy.orderType} onChange={(value) => setPolicy("orderType", value as "market" | "limit")} options={[{ value: "market", label: "시장가: 바로 살 수 있는 가격" }, { value: "limit", label: "지정가: 내가 정한 가격" }]} help="시장가는 체결 가능성이 높지만 가격이 달라질 수 있고, 지정가는 정한 가격에 닿지 않으면 체결되지 않을 수 있습니다." /></div>
     <div className="auto-trading-preset">
