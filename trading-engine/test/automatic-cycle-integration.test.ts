@@ -302,6 +302,59 @@ describe("automatic account-exit integration", () => {
     ]);
   });
 
+  it("holds a cost-recovered winner through noise and sells only through its rising protected floor", async () => {
+    const adapter = await startMemoryEngine((settings) => {
+      Object.assign(settings.brokers.kiwoom.orderPolicy, {
+        trailingProfitEnabled: true,
+        trailingActivationBps: 90,
+        trailingDrawdownBps: 30,
+        estimatedRoundTripCostBps: 30,
+      });
+    });
+
+    adapter.emitQuote(10_100);
+    await setImmediate();
+    adapter.emitQuote(10_090);
+    await setImmediate();
+    expect(adapter.placeOrder).not.toHaveBeenCalled();
+
+    vi.setSystemTime(sessionStart + 2_000);
+    adapter.emitQuote(10_069);
+    await vi.waitFor(() => expect(adapter.placeOrder).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ symbol, side: "sell", quantity: 10 }),
+    ));
+  });
+
+  it("records the current quote when retrying a latched trailing exit", async () => {
+    const adapter = await startMemoryEngine((settings) => {
+      Object.assign(settings.brokers.kiwoom.orderPolicy, {
+        trailingProfitEnabled: true,
+        trailingActivationBps: 90,
+        trailingDrawdownBps: 30,
+        estimatedRoundTripCostBps: 30,
+        orderRetrySeconds: 5,
+      });
+    });
+
+    adapter.emitQuote(10_100);
+    await setImmediate();
+    vi.setSystemTime(sessionStart + 2_000);
+    adapter.emitQuote(10_069);
+    await vi.waitFor(() => expect(adapter.placeOrder).toHaveBeenCalledTimes(1));
+
+    const firstOrder = adapter.openOrders.shift()!;
+    adapter.emitOrder({ ...firstOrder, status: "CANCELED", remainingQuantity: 0 });
+    await vi.waitFor(async () => {
+      expect((await engine!.settingsResponse()).connections.kiwoom.accountSynchronized).toBe(true);
+    }, { timeout: 2_000 });
+
+    vi.setSystemTime(sessionStart + 8_000);
+    adapter.emitQuote(10_000);
+    await vi.waitFor(() => expect(adapter.placeOrder).toHaveBeenCalledTimes(2));
+    const sellSignals = repository!.listSignals(scope, { actions: ["SELL"], limit: 10 });
+    expect(sellSignals.map((signal) => signal.metrics.currentPrice)).toContain(10_000);
+  });
+
   it("waits for the account snapshot after a partial-fill cancellation and retries only the confirmed remainder without duplicating active orders", async () => {
     const adapter = await startMemoryEngine((settings) => {
       settings.brokers.kiwoom.orderPolicy.stopLossEnabled = true;

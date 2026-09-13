@@ -35,6 +35,19 @@ describe("쉬운 매매 규칙 설명", () => {
     expect(tradingRuleSummary(settings).sell).toContain("평균가격보다 0.15% 넘게 하락");
     expect(tradingRuleSummary(settings).sell).not.toContain("분 경과");
   });
+  it("비용 회수 뒤 고정 상한 없이 고점을 따라가는 동작을 설명한다", () => {
+    const settings = createDefaultSettings().brokers.kiwoom;
+    Object.assign(settings.orderPolicy, {
+      takeProfitEnabled: false,
+      trailingProfitEnabled: true,
+      trailingActivationBps: 90,
+      trailingDrawdownBps: 30,
+    });
+    expect(plainTradingRuleSummary(settings).sell).toContain("거래비용을 회수한 뒤에는 본전선을 지키면서 상승 고점을 따라가고");
+    const detailed = tradingRuleSummary(settings).sell;
+    expect(detailed).toContain("0.9% 오른 뒤 거래비용 회수선을 보호하면서 고점을 추적");
+    expect(detailed).toContain("고점에서 0.3% 하락");
+  });
   it("시간이 지나도 수익 중인 종목을 유지하는 설정을 설명한다", () => {
     const settings = createDefaultSettings().brokers.kiwoom;
     Object.assign(settings.orderPolicy, { maxHoldingMinutes: 15, timedExitOnlyWithoutNetProfit: true });

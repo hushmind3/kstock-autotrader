@@ -94,7 +94,66 @@ describe("account take-profit exit policy", () => {
     expect(evaluatePositionExitPolicy({ position, quote: { ...quote, price: 10_000 }, peakPrice: 10_200, orderPolicy })).toBeNull();
     expect(evaluatePositionExitPolicy({ position, quote: { ...quote, price: 10_136 }, peakPrice: 10_300, orderPolicy }))
       .toMatchObject({ action: "SELL", reasonCodes: ["TRAILING_PROFIT_TRIGGERED"] });
-    expect(evaluatePositionExitPolicy({ position, quote: { ...quote, price: 10_200 }, peakPrice: 10_300, orderPolicy })).toBeNull();
+    expect(evaluatePositionExitPolicy({ position, quote: { ...quote, price: 10_200 }, peakPrice: 10_300, orderPolicy }))
+      .toMatchObject({ action: "HOLD", reasonCodes: ["PROFIT_PROTECTION_ACTIVE"] });
+  });
+
+  it("locks the learned cost floor after activation without selling at a fresh peak", () => {
+    const orderPolicy = createDefaultSettings().brokers.kiwoom.orderPolicy;
+    Object.assign(orderPolicy, {
+      trailingProfitEnabled: true,
+      trailingActivationBps: 30,
+      trailingDrawdownBps: 150,
+      estimatedRoundTripCostBps: 20,
+    });
+    expect(evaluatePositionExitPolicy({
+      position,
+      quote: { ...quote, price: 10_040 },
+      peakPrice: 10_040,
+      orderPolicy,
+      observedRoundTripCostBps: 40,
+    })).toMatchObject({
+      action: "HOLD",
+      reasonCodes: ["PROFIT_PROTECTION_ACTIVE"],
+      metrics: {
+        estimatedRoundTripCostBps: 40,
+        profitProtectionActivationBps: 40,
+        protectedFloorPrice: 10_040,
+      },
+    });
+    expect(evaluatePositionExitPolicy({
+      position,
+      quote: { ...quote, price: 10_039 },
+      peakPrice: 10_040,
+      orderPolicy,
+      observedRoundTripCostBps: 40,
+    })).toMatchObject({ action: "SELL", reasonCodes: ["TRAILING_PROFIT_TRIGGERED"] });
+  });
+
+  it("lets a profitable peak run and raises the protected floor with it", () => {
+    const orderPolicy = createDefaultSettings().brokers.kiwoom.orderPolicy;
+    Object.assign(orderPolicy, {
+      trailingProfitEnabled: true,
+      trailingActivationBps: 90,
+      trailingDrawdownBps: 30,
+      estimatedRoundTripCostBps: 30,
+    });
+    expect(evaluatePositionExitPolicy({
+      position,
+      quote: { ...quote, price: 10_970 },
+      peakPrice: 11_000,
+      orderPolicy,
+    })).toMatchObject({
+      action: "HOLD",
+      reasonCodes: ["PROFIT_PROTECTION_ACTIVE"],
+      metrics: { protectedFloorPrice: 10_967 },
+    });
+    expect(evaluatePositionExitPolicy({
+      position,
+      quote: { ...quote, price: 10_967 },
+      peakPrice: 11_000,
+      orderPolicy,
+    })).toMatchObject({ action: "SELL", reasonCodes: ["TRAILING_PROFIT_TRIGGERED"] });
   });
 
   it("ages out only stagnant holdings and lets profitable trends continue", () => {

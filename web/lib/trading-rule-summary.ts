@@ -9,7 +9,7 @@ export function plainTradingRuleSummary(settings: BrokerSettings): { buy: string
   parts.push(settings.strategyId === "intraday-momentum"
     ? "짧은 가격 흐름이 꺾여 매도 조건에 걸리면 팝니다." : "선택한 전략의 매도 조건에 걸리면 팝니다.");
   if (policy.stopLossEnabled) parts.push("손실이 커지면 손절합니다.");
-  if (policy.trailingProfitEnabled) parts.push("상승 중 기록한 고점에서 정한 폭만큼 내려와도 팝니다.");
+  if (policy.trailingProfitEnabled) parts.push("거래비용을 회수한 뒤에는 본전선을 지키면서 상승 고점을 따라가고, 흐름이 꺾이면 팝니다.");
   if (policy.maxHoldingMinutes) parts.push(policy.timedExitOnlyWithoutNetProfit
     ? "오래 보유해도 예상 거래비용을 뺀 수익이 없으면 정리합니다. 수익 중이면 시간만으로 팔지 않습니다."
     : "정한 보유시간이 지나면 수익 여부와 관계없이 정리합니다.");
@@ -27,7 +27,7 @@ export function tradingRuleSummary(settings: BrokerSettings): { buy: string; sel
   }
   if (policy.stopLossEnabled) exits.push(`매수가보다 ${(policy.stopLossBps ?? 300) / 100}% 하락`);
   if (policy.trailingProfitEnabled) {
-    exits.push(`${(policy.trailingActivationBps ?? 300) / 100}% 오른 뒤 기록한 고점에서 ${(policy.trailingDrawdownBps ?? 150) / 100}% 하락`);
+    exits.push(`${(policy.trailingActivationBps ?? 300) / 100}% 오른 뒤 거래비용 회수선을 보호하면서 고점을 추적하고, 고점에서 ${(policy.trailingDrawdownBps ?? 150) / 100}% 하락`);
   }
   if (policy.maxHoldingMinutes) exits.push(policy.timedExitOnlyWithoutNetProfit
     ? `보유 ${policy.maxHoldingMinutes}분이 지나도 예상 비용을 뺀 수익이 없을 때`

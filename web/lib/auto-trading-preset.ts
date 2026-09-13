@@ -61,9 +61,17 @@ export function withIntradayTradingPreset(
       estimatedRoundTripCostBps: 30,
       takeProfitAfterCosts: true,
       takeProfitEnabled: false,
+      // Kept only as an inactive fallback if fixed take-profit is enabled
+      // later; avoid preserving an old scalp-sized 0.2% target in the form.
+      takeProfitBps: 500,
       stopLossEnabled: true,
       stopLossBps: 60,
-      trailingProfitEnabled: false,
+      // Recover roughly three times the configured round-trip cost before the
+      // account-level protector takes over, then follow the winner without a
+      // fixed profit cap. The engine raises the cost floor from real fills.
+      trailingProfitEnabled: true,
+      trailingActivationBps: 90,
+      trailingDrawdownBps: 30,
       stagnationExitEnabled: false,
       maxHoldingMinutes: 15,
       timedExitOnlyWithoutNetProfit: true,

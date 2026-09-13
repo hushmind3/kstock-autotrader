@@ -607,7 +607,7 @@ export function BrokerSettingsPanel({ id, settings, strategies, scanIntervalMs, 
       <Toggle label="시간이 지나도 수익 중이면 계속 보유" checked={settings.orderPolicy.timedExitOnlyWithoutNetProfit ?? false} onChange={(value) => setPolicy("timedExitOnlyWithoutNetProfit", value)} help="시간 기준 매도에만 적용합니다. 가격 흐름에 따른 매도와 손절은 그대로 작동합니다." />
     </div>
     </SettingsSection>
-    <SettingsSection title="언제 팔지" description="손절·목표수익·오른 뒤 되밀림·장기 정체 조건을 모두 정합니다.">
+    <SettingsSection title="언제 팔지" description="손실은 제한하고, 거래비용을 회수한 수익 종목은 고점을 따라가며 오래 끌고 갑니다.">
     <p className="form-description">{tradingRuleSummary(settings).sell}</p>
     <p className="form-description">매수한 뒤에도 보유종목을 계속 검사합니다. 아래에서 켜둔 매도 조건이나 선택한 전략의 매도 신호가 나오면 팔고, 이후 새로운 매수 기회를 다시 찾습니다.</p>
     <div className="form-grid">
@@ -619,13 +619,13 @@ export function BrokerSettingsPanel({ id, settings, strategies, scanIntervalMs, 
     </div>
     <div className="form-grid four">
       <Toggle label="세금·수수료를 빼고 목표 계산" checked={afterCosts} onChange={(value) => setPolicy("takeProfitAfterCosts", value)} help="목표수익 자동매도에만 씁니다. 비용을 빼고도 목표만큼 남을 때 팔도록 계산합니다." />
-      <PercentField label="세금·수수료 여유분" valueBps={estimatedCostBps} onChange={(value) => setPolicy("estimatedRoundTripCostBps", value)} min={0} max={10} help="매수·매도 수수료, 매도 세금, 주문가격 차이에 대비해 미리 빼둘 비율입니다." />
+      <PercentField label="최소 거래비용 여유분" valueBps={estimatedCostBps} onChange={(value) => setPolicy("estimatedRoundTripCostBps", value)} min={0} max={10} help="처음에는 이 값을 사용하고, 실제 주문이 체결되면 주문 신호 가격과 체결가의 불리한 차이 및 기록된 수수료·세금을 반영해 필요한 비용 여유분을 자동으로 높입니다." />
       {afterCosts && settings.orderPolicy.takeProfitEnabled ? <p className="form-description">현재 가격 기준으로 약 {((settings.orderPolicy.takeProfitBps + estimatedCostBps) / 100).toFixed(2)}% 상승해야 예상 비용을 뺀 목표에 도달합니다. 확정 수익을 보장하는 수치는 아닙니다.</p> : null}
     </div>
     <div className="form-grid four">
-      <Toggle label="수익을 따라가며 팔기" checked={settings.orderPolicy.trailingProfitEnabled ?? false} onChange={(value) => setPolicy("trailingProfitEnabled", value)} help="수익이 시작 기준에 도달하면 고점을 기억하고, 그 고점에서 정한 폭만큼 내려왔을 때 매도합니다." />
-      <PercentField label="수익 추적을 시작할 수익률" valueBps={settings.orderPolicy.trailingActivationBps ?? 300} onChange={(value) => setPolicy("trailingActivationBps", value)} min={0.01} max={1000} help="예: 3%면 평균 매수가보다 3% 이상 오른 뒤부터 고점 대비 하락을 감시합니다." />
-      <PercentField label="고점에서 내려오면 팔 하락률" valueBps={settings.orderPolicy.trailingDrawdownBps ?? 150} onChange={(value) => setPolicy("trailingDrawdownBps", value)} min={0.01} max={99.99} help="예: 1.5%면 수익 추적 중 기록한 고점보다 1.5% 내려왔을 때 매도합니다." />
+      <Toggle label="비용 회수 후 수익 따라가기" checked={settings.orderPolicy.trailingProfitEnabled ?? false} onChange={(value) => setPolicy("trailingProfitEnabled", value)} help="시작 기준까지 오르면 거래비용 회수선을 본전선으로 잠그고, 이후에는 더 오른 고점을 따라가다가 흐름이 꺾일 때 매도합니다. 고정된 작은 수익에 바로 팔지 않습니다." />
+      <PercentField label="고점 추적을 시작할 상승률" valueBps={settings.orderPolicy.trailingActivationBps ?? 300} onChange={(value) => setPolicy("trailingActivationBps", value)} min={0.01} max={1000} help="이만큼 오른 뒤부터 수익 보호가 작동합니다. 실제 비용 추정치가 더 크면 비용을 회수할 때까지 자동으로 시작선을 높입니다." />
+      <PercentField label="고점에서 되밀리면 팔 폭" valueBps={settings.orderPolicy.trailingDrawdownBps ?? 150} onChange={(value) => setPolicy("trailingDrawdownBps", value)} min={0.01} max={99.99} help="수익 보호가 시작된 뒤 기록한 최고가에서 이만큼 내려오면 매도합니다. 거래비용 회수선과 고점 추적선 중 더 높은 선을 사용합니다." />
     </div>
     <div className="form-grid four">
       <Toggle label="오래 제자리면 팔기" checked={settings.orderPolicy.stagnationExitEnabled ?? false} onChange={(value) => setPolicy("stagnationExitEnabled", value)} help="정한 거래일이 지나도 수익률이 아래 기준 이하이면 보유 가능 수량을 매도합니다. 기준보다 잘 오르는 종목은 기간만으로 팔지 않습니다." />

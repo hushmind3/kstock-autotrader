@@ -90,7 +90,7 @@ const intradayStrategy: StrategySummary = {
 };
 
 describe("초단타 기본값 채우기", () => {
-  it("고정 익절은 끄고 수익 없는 보유분의 시간 매도와 초 단위 대기를 채운다", () => {
+  it("고정 익절 없이 비용 회수 뒤 고점을 추적하고 초 단위 대기를 채운다", () => {
     const next = withIntradayTradingPreset(settings, [intradayStrategy]);
     expect(next.strategyId).toBe("intraday-momentum");
     expect(next.strategyConfig).toEqual(intradayStrategy.defaultConfig);
@@ -103,9 +103,12 @@ describe("초단타 기본값 채우기", () => {
       estimatedRoundTripCostBps: 30,
       takeProfitAfterCosts: true,
       takeProfitEnabled: false,
+      takeProfitBps: 500,
       stopLossEnabled: true,
       stopLossBps: 60,
-      trailingProfitEnabled: false,
+      trailingProfitEnabled: true,
+      trailingActivationBps: 90,
+      trailingDrawdownBps: 30,
       stagnationExitEnabled: false,
       maxHoldingMinutes: 15,
       timedExitOnlyWithoutNetProfit: true,

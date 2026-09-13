@@ -50,6 +50,10 @@ import {
 } from "./broker-connection.js";
 import { OrderDispatcher } from "./order-dispatcher.js";
 import { evaluatePositionExitPolicy, positionExitPolicyKey } from "./exit-policy.js";
+import {
+  estimateExecutionCost,
+  type ExecutionCostObservation,
+} from "./execution-cost.js";
 import { PositionLifecycle, verifiedQuoteObservedAt } from "./position-lifecycle.js";
 import { IntradayTape } from "./intraday-tape.js";
 import { MarketDataService, type MarketRuntimeView } from "../services/market-data-service.js";
@@ -69,6 +73,8 @@ interface BrokerRuntime {
   reconcileTimer: NodeJS.Timeout | null;
   reconcilePromise: Promise<void> | null;
   accountEventVersion: number;
+  executionCostBps: number;
+  executionCostLoaded: boolean;
 }
 
 interface CandidateState {
@@ -1525,6 +1531,8 @@ export class TradingEngine {
         reconcileTimer: null,
         reconcilePromise: null,
         accountEventVersion: 0,
+        executionCostBps: settings.orderPolicy.estimatedRoundTripCostBps,
+        executionCostLoaded: false,
       };
       runtime.unsubscribe = adapter.onEvent((event) => this.handleBrokerEvent(runtime, event));
       this.#runtimes.set(brokerId, runtime);
@@ -1695,6 +1703,26 @@ export class TradingEngine {
       } catch (error) {
         reconciliationFailed = true;
         this.recordError(error, `execution-reconcile:${execution.executionId}`, scope);
+      }
+    }
+
+    if (!runtime.executionCostLoaded || ledgerChangedDuringFetch) {
+      const previousCostBps = runtime.executionCostBps;
+      const estimate = this.estimateRuntimeExecutionCost(runtime);
+      runtime.executionCostBps = estimate.roundTripCostBps;
+      runtime.executionCostLoaded = true;
+      if (estimate.sampleCount > 0 && estimate.roundTripCostBps !== previousCostBps) {
+        this.#repository.appendAudit({
+          actor: "trading-engine",
+          action: "EXECUTION_COST_ESTIMATE_UPDATED",
+          scope,
+          payload: {
+            configuredFloorBps: runtime.settings.orderPolicy.estimatedRoundTripCostBps,
+            observedRoundTripCostBps: estimate.observedRoundTripCostBps,
+            effectiveRoundTripCostBps: estimate.roundTripCostBps,
+            sampleCount: estimate.sampleCount,
+          },
+        });
       }
     }
 
@@ -2064,7 +2092,7 @@ export class TradingEngine {
         ? this.#positionLifecycle.observeQuote(adapter.scope, quote)
         : this.#positionLifecycle.get(adapter.scope, quote.symbol);
       const exitPolicy = runtime.settings.orderPolicy;
-      const exitPolicyKey = positionExitPolicyKey(exitPolicy);
+      const exitPolicyKey = positionExitPolicyKey(exitPolicy, runtime.executionCostBps);
       const latchedExit = cycle?.exitPolicyKey === exitPolicyKey ? cycle.exitDecision : null;
       const latchStillEnabled = latchedExit?.reasonCodes.some((reason) =>
         reason === "STOP_LOSS_TRIGGERED" ? exitPolicy.stopLossEnabled
@@ -2077,6 +2105,7 @@ export class TradingEngine {
         position,
         quote,
         orderPolicy: exitPolicy,
+        observedRoundTripCostBps: runtime.executionCostBps,
         ...(cycle?.peakPrice ? { peakPrice: cycle.peakPrice } : {}),
         ...(cycle?.openedAt ? {
           completedHoldingSessions: this.#marketClock.completedHoldingSessions(cycle.openedAt, new Date(quote.receivedAt)),
@@ -2129,13 +2158,18 @@ export class TradingEngine {
       }
       if (!snapshotOnly) this.#lastActions.set(key, decision.action);
       if (decision.action === "BUY" || decision.action === "SELL") {
+        // Account-exit decisions may be latched across a confirmed cancellation
+        // so the engine keeps trying to flatten the position. Persist the quote
+        // from this actual dispatch attempt, rather than the quote that first
+        // created the latch, for execution-slippage learning.
+        const dispatchMetrics = { ...decision.metrics, currentPrice: quote.price };
         const signalId = `signal-${stableHash({
           scope: adapter.scope,
           strategyConfigId: runtime.strategyConfigId,
           symbol: quote.symbol,
           action: decision.action,
           receivedAt: quote.receivedAt,
-          metrics: decision.metrics,
+          metrics: dispatchMetrics,
           attemptWindow: Math.floor(evaluationTime / (exitPolicy.orderRetrySeconds * 1_000)),
         }).slice(0, 48)}`;
         const name = this.#repository.getInstrument(quote.symbol)?.name ?? "";
@@ -2170,7 +2204,7 @@ export class TradingEngine {
             symbol: quote.symbol,
             action: decision.action,
             reasonCodes: decision.reasonCodes,
-            metrics: decision.metrics,
+            metrics: dispatchMetrics,
             inputHash: stableHash({
               bars: bars.map((bar) => [bar.tradingDate, bar.close, bar.volume]),
               quote,
@@ -2193,6 +2227,39 @@ export class TradingEngine {
     } finally {
       this.#evaluating.delete(key);
     }
+  }
+
+  private estimateRuntimeExecutionCost(runtime: BrokerRuntime) {
+    const scope = runtime.adapter.scope;
+    const signals = new Map(
+      this.#repository.listSignals(scope, {
+        actions: ["BUY", "SELL"],
+        limit: 10_000,
+      }).map((signal) => [signal.id, signal]),
+    );
+    const observations: ExecutionCostObservation[] = [];
+    for (const fill of this.#repository.listFills(scope, { limit: 500 })) {
+      const order = this.#repository.getOrder(fill.orderId, scope);
+      const intent = order?.intentId
+        ? this.#repository.getOrderIntent(order.intentId)
+        : null;
+      const signal = intent?.signalId ? signals.get(intent.signalId) : undefined;
+      const currentPrice = signal?.metrics.currentPrice;
+      observations.push({
+        side: fill.side,
+        quantity: fill.quantity,
+        fillPrice: fill.price,
+        feeKrw: fill.fee,
+        taxKrw: fill.tax,
+        ...(typeof currentPrice === "number" && Number.isFinite(currentPrice) && currentPrice > 0
+          ? { referencePrice: currentPrice }
+          : {}),
+      });
+    }
+    return estimateExecutionCost(
+      observations,
+      runtime.settings.orderPolicy.estimatedRoundTripCostBps,
+    );
   }
 
   private confirmOrderWindowFromQuote(runtime: BrokerRuntime, quote: Quote): void {
@@ -2276,10 +2343,17 @@ export class TradingEngine {
               restrictionCodes: [] as string[],
             };
         const marketRegime = this.#marketData.metrics.marketRegime;
+        const costAwareBrokerSettings: BrokerRuntimeSettings = {
+          ...runtime.settings,
+          orderPolicy: {
+            ...runtime.settings.orderPolicy,
+            estimatedRoundTripCostBps: runtime.executionCostBps,
+          },
+        };
         const result = await this.#orderDispatcher.dispatch({
           adapter: runtime.adapter,
           appSettings: this.#settings,
-          brokerSettings: this.#settings.brokers[scope.brokerId],
+          brokerSettings: costAwareBrokerSettings,
           signal,
           quote,
           health: this.runtimeHealth(runtime),
