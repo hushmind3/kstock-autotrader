@@ -179,7 +179,38 @@ describe("Kiwoom WebSocket quote normalization", () => {
     expect(event).toBeDefined();
     if (event?.type === "quote") {
       expect(event.quote.tradingDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      expect(event.quote.brokerTimestampVerified).toBe(true);
     }
+    await client.disconnect();
+  });
+
+  it("drops a fractional optional OHLC field without dropping the tradable quote", async () => {
+    const { client, socket, events } = await createHarness();
+    socket.receive(
+      "0B",
+      {
+        "10": "+71000",
+        "13": "12345",
+        "16": "+70500.25",
+        "17": "+71500",
+        "18": "+70000",
+        "20": "091500",
+      },
+      "005930",
+    );
+
+    const event = events.find((candidate) => candidate.type === "quote");
+    expect(event).toBeDefined();
+    if (event?.type === "quote") {
+      expect(event.quote).toMatchObject({
+        price: 71_000,
+        high: 71_500,
+        low: 70_000,
+        cumulativeVolume: 12_345,
+      });
+      expect(event.quote).not.toHaveProperty("open");
+    }
+    expect(events.some((candidate) => candidate.type === "error")).toBe(false);
     await client.disconnect();
   });
 });

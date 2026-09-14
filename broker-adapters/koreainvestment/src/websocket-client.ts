@@ -28,7 +28,11 @@ import {
   stringValue,
 } from "./utils.js";
 
-const QUOTE_FIELD_COUNT = 46;
+// KIS added MARKET_CLS_CODE at index 45 on 2026-09-14 and moved
+// VI_STND_PRC to index 46. Paper or delayed endpoints can still emit the
+// previous 46-field shape, so accept either shape only when the whole frame
+// has an exact record boundary.
+const QUOTE_FIELD_COUNTS = [47, 46] as const;
 const ACCOUNT_NOTICE_FIELD_COUNT = 26;
 const SUBSCRIPTION_PACING_MS = 100;
 const SUBSCRIPTION_ACK_TIMEOUT_MS = 10_000;
@@ -114,6 +118,53 @@ export function kisRefusalState(
 /** The `ws` runtime follows Node callbacks and may report success as null. */
 export function kisWebSocketSendSucceeded(error: Error | null | undefined): boolean {
   return error == null;
+}
+
+function safeNonNegativeInteger(value: unknown): number | undefined {
+  const normalized = stringValue(value).replaceAll(",", "");
+  if (normalized === "") return undefined;
+  const parsed = Number(normalized);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined;
+}
+
+/** Normalize only complete KRW equity ticks after frame boundaries are verified. */
+export function parseKisRealtimeQuote(
+  fields: readonly string[],
+  quoteExchange: Exchange = "KRX",
+  receivedAt = new Date(),
+): Quote | null {
+  const symbol = stringValue(fields[0]).toUpperCase();
+  const price = safeNonNegativeInteger(fields[2]);
+  const cumulativeVolume = safeNonNegativeInteger(fields[13]);
+  if (
+    !/^[0-9A-Z]{6}$/.test(symbol) ||
+    price === undefined || price <= 0 ||
+    cumulativeVolume === undefined
+  ) return null;
+  const now = currentKisDateTime(receivedAt);
+  const hasBrokerDate = /^\d{8}$/.test(fields[33] ?? "");
+  const hasBrokerTime = /^\d{6}$/.test(fields[1] ?? "");
+  const tradingDate = hasBrokerDate ? (fields[33] as string) : now.date;
+  const tradingTime = hasBrokerTime ? (fields[1] as string) : now.time;
+  const open = safeNonNegativeInteger(fields[7]);
+  const high = safeNonNegativeInteger(fields[8]);
+  const low = safeNonNegativeInteger(fields[9]);
+  return {
+    symbol,
+    price,
+    ...(open === undefined ? {} : { open }),
+    ...(high === undefined ? {} : { high }),
+    ...(low === undefined ? {} : { low }),
+    cumulativeVolume,
+    tradingDate: domainTradingDate(tradingDate),
+    tradingTime,
+    receivedAt: receivedAt.toISOString(),
+    source: "koreainvestment",
+    exchange: quoteExchange,
+    ...(hasBrokerDate && hasBrokerTime
+      ? { brokerTimestampVerified: true }
+      : { stale: true }),
+  };
 }
 
 export class KisWebSocketClient {
@@ -446,7 +497,10 @@ export class KisWebSocketClient {
     if (parts.length < 4) throw new Error("Malformed KIS websocket data frame");
     const encrypted = parts[0] === "1";
     const trId = parts[1] ?? "";
-    const count = Math.max(1, Number.parseInt(parts[2] ?? "1", 10) || 1);
+    const count = Number.parseInt(parts[2] ?? "", 10);
+    if (!Number.isSafeInteger(count) || count <= 0) {
+      throw new Error("Malformed KIS websocket record count");
+    }
     let payload = parts.slice(3).join("|");
     if (encrypted) {
       const material = this.#encryptionByTr.get(trId);
@@ -457,62 +511,49 @@ export class KisWebSocketClient {
     }
 
     if (trId === this.#quoteTrId) {
-      this.#forEachRecord(payload, count, QUOTE_FIELD_COUNT, (fields) =>
+      const values = payload.trim().split("^");
+      const fieldCount = QUOTE_FIELD_COUNTS.find(
+        (candidate) => values.length === count * candidate,
+      );
+      if (fieldCount === undefined) {
+        throw new Error(
+          `Malformed KIS realtime quote frame: ${values.length} fields for ${count} records`,
+        );
+      }
+      this.#forEachRecord(values, count, fieldCount, (fields) =>
         this.#handleQuote(fields),
       );
       return;
     }
     if (trId === KIS_TR_IDS[this.#options.environment].accountNotice) {
-      this.#forEachRecord(payload, count, ACCOUNT_NOTICE_FIELD_COUNT, (fields) =>
+      const values = payload.trim().split("^");
+      this.#forEachRecord(values, count, ACCOUNT_NOTICE_FIELD_COUNT, (fields) =>
         this.#handleAccountNotice(fields),
       );
     }
   }
 
   #forEachRecord(
-    payload: string,
+    values: string[],
     declaredCount: number,
     fieldCount: number,
     callback: (fields: string[]) => void,
   ): void {
-    const values = payload.trim().split("^");
-    const availableCount = Math.floor(values.length / fieldCount);
-    const count = Math.min(declaredCount, availableCount);
-    for (let index = 0; index < count; index += 1) {
+    if (values.length !== declaredCount * fieldCount) {
+      throw new Error(
+        `Malformed KIS websocket frame: ${values.length} fields for ${declaredCount} records`,
+      );
+    }
+    for (let index = 0; index < declaredCount; index += 1) {
       callback(values.slice(index * fieldCount, (index + 1) * fieldCount));
     }
   }
 
   #handleQuote(fields: string[]): void {
-    const symbol = stringValue(fields[0]).toUpperCase();
-    const price = numberValue(fields[2]);
-    if (!/^[0-9A-Z]{6}$/.test(symbol) || price <= 0) return;
-    const receivedAt = new Date();
-    const now = currentKisDateTime(receivedAt);
-    const hasBrokerDate = /^\d{8}$/.test(fields[33] ?? "");
-    const hasBrokerTime = /^\d{6}$/.test(fields[1] ?? "");
-    const tradingDate = hasBrokerDate
-      ? (fields[33] as string)
-      : now.date;
-    const tradingTime = hasBrokerTime
-      ? (fields[1] as string)
-      : now.time;
-    this.#options.onQuote({
-      symbol,
-      price,
-      open: numberValue(fields[7]),
-      high: numberValue(fields[8]),
-      low: numberValue(fields[9]),
-      cumulativeVolume: numberValue(fields[13]),
-      tradingDate: domainTradingDate(tradingDate),
-      tradingTime,
-      receivedAt: receivedAt.toISOString(),
-      source: "koreainvestment",
-      exchange: this.#quoteExchange,
-      ...(hasBrokerDate && hasBrokerTime
-        ? { brokerTimestampVerified: true }
-        : { stale: true }),
-    });
+    const quote = parseKisRealtimeQuote(fields, this.#quoteExchange);
+    if (quote !== null && this.#desiredQuotes.has(quote.symbol)) {
+      this.#options.onQuote(quote);
+    }
   }
 
   #handleAccountNotice(fields: string[]): void {

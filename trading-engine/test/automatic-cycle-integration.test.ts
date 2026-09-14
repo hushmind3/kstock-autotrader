@@ -234,6 +234,19 @@ afterEach(async () => {
 });
 
 describe("automatic account-exit integration", () => {
+  it("contains a malformed realtime quote without crashing the engine", async () => {
+    const adapter = await startMemoryEngine(() => undefined);
+
+    adapter.emitQuote(10_000, { open: 10_000.25 });
+
+    await vi.waitFor(() => {
+      expect(repository!.listErrors({ scope, limit: 10 })).toEqual(expect.arrayContaining([
+        expect.objectContaining({ message: expect.stringContaining("quote.open must be a safe integer") }),
+      ]));
+    });
+    expect((await engine!.dashboard()).engine.state).toBe("RUNNING");
+  });
+
   it("rechecks a conditional time exit after a profit recovery instead of reusing the old sell decision", async () => {
     const adapter = await startMemoryEngine((settings) => {
       Object.assign(settings.brokers.kiwoom.orderPolicy, { takeProfitEnabled: false, maxHoldingMinutes: 15,

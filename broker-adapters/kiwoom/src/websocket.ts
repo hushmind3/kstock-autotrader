@@ -51,6 +51,26 @@ const MAX_QUOTE_SUBSCRIPTIONS = 200;
 const LOGIN_ACK_TIMEOUT_MS = 20_000;
 const CONTROL_ACK_TIMEOUT_MS = 10_000;
 
+function optionalSafeIntegerPrice(value: unknown): number | undefined {
+  const price = brokerPrice(value);
+  return price !== undefined && Number.isSafeInteger(price) ? price : undefined;
+}
+
+function requiredSafeIntegerPrice(
+  record: UnknownRecord,
+  key: string,
+  context: string,
+): number {
+  const price = requiredBrokerPrice(record, key, context);
+  if (!Number.isSafeInteger(price)) {
+    throw new KiwoomProtocolError(
+      `Kiwoom ${context} must be a safe integer KRW price.`,
+      "MALFORMED_RESPONSE",
+    );
+  }
+  return price;
+}
+
 /**
  * Kiwoom 0s publishes KRX, NXT and derivatives operation codes on the same
  * stream. This engine trades the KRX regular session, so NXT/derivatives
@@ -415,20 +435,37 @@ export class KiwoomWebSocketClient {
     const rawSymbol = requiredString(packet, "item", "real-time symbol");
     const symbol = assertSymbol(rawSymbol);
     const rawTradingTime = stringAt(values, "20")?.replaceAll(":", "");
-    const tradingTime = isValidTradingTime(rawTradingTime) ? rawTradingTime : clock.time;
+    const brokerTimeVerified = isValidTradingTime(rawTradingTime);
+    const tradingTime = brokerTimeVerified ? rawTradingTime : clock.time;
+    const price = requiredSafeIntegerPrice(values, "10", "real-time price");
+    const open = optionalSafeIntegerPrice(values["16"]);
+    const high = optionalSafeIntegerPrice(values["17"]);
+    const low = optionalSafeIntegerPrice(values["18"]);
+    const cumulativeVolume = Math.abs(
+      requiredBrokerNumber(values, "13", "real-time cumulative volume"),
+    );
+    if (!Number.isSafeInteger(cumulativeVolume)) {
+      throw new KiwoomProtocolError(
+        "Kiwoom real-time cumulative volume must be a safe integer.",
+        "MALFORMED_RESPONSE",
+      );
+    }
     const quote = {
       symbol,
-      price: requiredBrokerPrice(values, "10", "real-time price"),
-      ...(brokerPrice(values["16"]) === undefined ? {} : { open: brokerPrice(values["16"]) }),
-      ...(brokerPrice(values["17"]) === undefined ? {} : { high: brokerPrice(values["17"]) }),
-      ...(brokerPrice(values["18"]) === undefined ? {} : { low: brokerPrice(values["18"]) }),
-      cumulativeVolume: requiredBrokerNumber(values, "13", "real-time cumulative volume"),
+      price,
+      ...(open === undefined ? {} : { open }),
+      ...(high === undefined ? {} : { high }),
+      ...(low === undefined ? {} : { low }),
+      cumulativeVolume,
       tradingDate: domainTradingDate(clock.date),
       tradingTime,
       receivedAt: receivedAt.toISOString(),
       source: "kiwoom" as const,
       exchange: exchangeFromKiwoomQuoteSymbol(rawSymbol, this.quoteExchange),
-      ...(isValidTradingTime(rawTradingTime) ? {} : { stale: true }),
+      // Kiwoom's equity WS supplies the broker trade time but not a separate
+      // business-date field. Korean equity sessions do not cross midnight, so
+      // pairing a valid broker time with the KST receive date is unambiguous.
+      ...(brokerTimeVerified ? { brokerTimestampVerified: true } : { stale: true }),
     };
     this.options.onEvent({ type: "quote", quote });
   }

@@ -1906,7 +1906,17 @@ export class TradingEngine {
           event.quote.exchange === this.orderRoute(runtime.settings)) {
           this.#intradayTape.observe(runtime.adapter.scope, event.quote);
         }
-        void this.#marketData.handleRealtimeQuote(runtime.adapter, event.quote);
+        void this.#marketData.handleRealtimeQuote(runtime.adapter, event.quote).catch((error: unknown) => {
+          // Broker listeners are synchronous, while quote persistence and
+          // strategy evaluation are asynchronous. Contain a malformed quote
+          // here so one bad optional market-data field cannot become an
+          // unhandled rejection that repeatedly shuts down the whole engine.
+          this.recordError(
+            error,
+            `realtime-quote:${event.quote.symbol}`,
+            runtime.adapter.scope,
+          );
+        });
       } else if (event.type === "order") {
         const previous = this.#repository.findOrderByBrokerId(runtime.adapter.scope, event.order.brokerOrderId);
         const current = this.#repository.upsertReconciledOrder({ scope: runtime.adapter.scope, brokerOrder: event.order });
