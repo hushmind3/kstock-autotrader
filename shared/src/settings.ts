@@ -71,6 +71,7 @@ export type StrategyConfig = z.infer<typeof StrategyConfigSchema>;
 
 export const MarketRegimeSettingsSchema = z.object({
   enabled: z.boolean().default(true),
+  blockWhenKospiDown: z.boolean().default(true),
   longPeriod: z.number().int().min(20).max(250).default(60),
   minimumAboveLongMaBps: z.number().int().min(0).max(10_000).default(3_500),
   minimumIntradayAdvancingBps: z.number().int().min(0).max(10_000).default(3_000),

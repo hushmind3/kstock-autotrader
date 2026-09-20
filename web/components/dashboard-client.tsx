@@ -129,16 +129,49 @@ function breadthPercent(value: number | null): string {
   return value === null ? "확인 중" : `${(value / 100).toFixed(1)}%`;
 }
 
-function marketRegimeTitle(data: DashboardResponse): string {
-  if (!data.market.regime.enabled) return "장세 자동 판단을 사용하지 않습니다";
-  if (data.market.regime.status === "NORMAL") return "장세 자동 판단: 신규매수 가능";
-  if (data.market.regime.status === "WEAK") return "약세장 감지: 신규매수 자동 대기";
+function signedValue(value: number, fractionDigits: number): string {
+  const sign = value > 0 ? "+" : "";
+  return `${sign}${value.toLocaleString("ko-KR", {
+    minimumFractionDigits: fractionDigits,
+    maximumFractionDigits: fractionDigits,
+  })}`;
+}
+
+function kospiIndexDescription(data: DashboardResponse): string | null {
+  const index = data.market.regime.kospiIndex;
+  if (!index) return null;
+  const source = index.source === "kiwoom" ? "키움증권" : "한국투자증권";
+  return `${source} 공식 코스피 ${index.currentValue.toLocaleString("ko-KR", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })} · 전일 대비 ${signedValue(index.change, 2)} (${signedValue(index.changeRateBps / 100, 2)}%)`;
+}
+
+export function marketRegimeTitle(data: DashboardResponse): string {
+  const regime = data.market.regime;
+  if (!regime.enabled) return "장세 자동 판단을 사용하지 않습니다";
+  if (regime.reasonCode === "KOSPI_INDEX_NOT_READY") return "코스피 자료 확인 중 · 신규매수 대기";
+  if (regime.reasonCode === "KOSPI_INDEX_DOWN") return "코스피 파란색 · 신규매수 자동 대기";
+  if (regime.status === "NORMAL") {
+    const index = regime.kospiIndex;
+    return index && index.direction !== "DOWN" && index.changeRateBps >= 0
+      ? "코스피 보합 이상 · 신규매수 가능"
+      : "장세 조건 통과 · 신규매수 가능";
+  }
+  if (regime.status === "WEAK") return "약세장 감지: 신규매수 자동 대기";
   return "장세 자료 확인 중: 신규매수 자동 대기";
 }
 
-function marketRegimeDescription(data: DashboardResponse): string {
+export function marketRegimeDescription(data: DashboardResponse): string {
   const regime = data.market.regime;
   if (!regime.enabled) return "선택한 종목 전략과 계좌 안전한도만 적용합니다.";
+  if (regime.reasonCode === "KOSPI_INDEX_NOT_READY") {
+    return "증권사에서 코스피 전일 대비 값을 받는 중이거나 최근 값인지 확인하고 있습니다. 확인 전에는 새로 사지 않습니다.";
+  }
+  if (regime.reasonCode === "KOSPI_INDEX_DOWN") {
+    const index = kospiIndexDescription(data);
+    return `${index ?? "증권사 공식 코스피"}로 파란색입니다. 새 종목 매수만 쉽니다.`;
+  }
   if (regime.reasonCode === "DAILY_BREADTH_NOT_READY") {
     return `긴 시장 흐름을 판단할 종목이 ${formatNumber(regime.dailySampleCount)}개라 자료가 더 필요합니다.`;
   }
@@ -151,7 +184,14 @@ function marketRegimeDescription(data: DashboardResponse): string {
   if (regime.reasonCode === "INTRADAY_BREADTH_WEAK") {
     return `오늘 시가보다 오른 종목이 ${breadthPercent(regime.intradayAdvancingBps)}뿐이라 새 매수를 쉽니다.`;
   }
-  return `장기 평균가격 위 종목 ${breadthPercent(regime.dailyAboveLongMaBps)} · 오늘 상승 종목 ${breadthPercent(regime.intradayAdvancingBps)}입니다.`;
+  const index = kospiIndexDescription(data);
+  const indexSnapshot = regime.kospiIndex;
+  const indexStatus = index && indexSnapshot && indexSnapshot.direction !== "DOWN" && indexSnapshot.changeRateBps >= 0
+    ? `${index}로 보합 이상입니다. `
+    : index
+      ? `${index}입니다. 코스피 하락만으로 새 매수를 막는 상태는 아닙니다. `
+      : "";
+  return `${indexStatus}장기 평균가격 위 종목 ${breadthPercent(regime.dailyAboveLongMaBps)} · 오늘 상승 종목 ${breadthPercent(regime.intradayAdvancingBps)}입니다.`;
 }
 
 function conditionScanHint(data: DashboardResponse | null): string {
@@ -252,6 +292,12 @@ export function brokerOrderReadiness(data: DashboardResponse, broker: BrokerDash
   if (!isBrokerMarketOrderable(data, broker)) return "시장 대기 · 조건 감시는 계속";
   if (!broker.connection.readyForOrders) return "거래 시간 · 주문 연결 확인 중";
   if (!data.market.regime.buyAllowed) {
+    if (data.market.regime.reasonCode === "KOSPI_INDEX_DOWN") {
+      return "자동매도 감시 중 · 코스피 파란색이라 신규매수 대기";
+    }
+    if (data.market.regime.reasonCode === "KOSPI_INDEX_NOT_READY") {
+      return "자동매도 감시 중 · 코스피 자료 확인 중";
+    }
     return data.market.regime.status === "WEAK"
       ? "자동매도 감시 중 · 신규매수 약세장 대기"
       : "자동매도 감시 중 · 신규매수 자료 확인 중";

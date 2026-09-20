@@ -199,6 +199,9 @@ async function startMemoryEngine(configure: (settings: AppSettings) => void) {
   settings.newBuysPaused = false;
   settings.scanIntervalMs = 1_000;
   settings.marketRegime.minimumSampleSize = 20;
+  // These integration cases exercise the legacy breadth gate and automatic
+  // exit loop. The KOSPI-index gate has dedicated coverage elsewhere.
+  settings.marketRegime.blockWhenKospiDown = false;
   Object.assign(settings.brokers.kiwoom, {
     enabled: true,
     environment: "live",

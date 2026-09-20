@@ -15,6 +15,16 @@ function evaluate(overrides: Partial<Parameters<typeof evaluateMarketRegime>[0]>
     dailyAboveLongMaCount: 250,
     intradaySampleCount: 300,
     intradayAdvancingCount: 150,
+    kospiIndex: {
+      indexCode: "KOSPI",
+      currentValue: 3_300,
+      change: 10,
+      changeRateBps: 30,
+      direction: "UP",
+      tradingDate: "2026-09-08",
+      observedAt: "2026-09-08T00:00:00.000Z",
+      source: "kiwoom",
+    },
     requireIntradayEvidence: true,
     checkedAt: "2026-09-08T00:00:00.000Z",
     ...overrides,
@@ -48,6 +58,33 @@ describe("시장 전체 흐름 자동 판단", () => {
     });
   });
 
+  it("코스피가 전일보다 내려 파란색이면 신규매수만 막는다", () => {
+    expect(evaluate({
+      kospiIndex: {
+        indexCode: "KOSPI",
+        currentValue: 3_250,
+        change: -40,
+        changeRateBps: -122,
+        direction: "DOWN",
+        tradingDate: "2026-09-08",
+        observedAt: "2026-09-08T00:00:00.000Z",
+        source: "kiwoom",
+      },
+    })).toMatchObject({
+      status: "WEAK",
+      buyAllowed: false,
+      reasonCode: "KOSPI_INDEX_DOWN",
+    });
+  });
+
+  it("장중 코스피 실데이터가 없으면 추측하지 않고 신규매수를 기다린다", () => {
+    expect(evaluate({ kospiIndex: null })).toMatchObject({
+      status: "WAITING_FOR_DATA",
+      buyAllowed: false,
+      reasonCode: "KOSPI_INDEX_NOT_READY",
+    });
+  });
+
   it("장중 표본이 모자라면 추측하지 않고 기다린다", () => {
     expect(evaluate({ intradaySampleCount: 30, intradayAdvancingCount: 20 })).toMatchObject({
       status: "WAITING_FOR_DATA",
@@ -61,6 +98,7 @@ describe("시장 전체 흐름 자동 판단", () => {
       requireIntradayEvidence: false,
       intradaySampleCount: 0,
       intradayAdvancingCount: 0,
+      kospiIndex: null,
     })).toMatchObject({
       status: "NORMAL",
       buyAllowed: true,

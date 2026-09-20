@@ -1,4 +1,4 @@
-import type { MarketRegimeSettings } from "@kstock/shared";
+import type { KospiIndexSnapshot, MarketRegimeSettings } from "@kstock/shared";
 
 export type MarketRegimeStatus = "DISABLED" | "WAITING_FOR_DATA" | "NORMAL" | "WEAK";
 
@@ -6,6 +6,8 @@ export type MarketRegimeReasonCode =
   | "FILTER_DISABLED"
   | "DAILY_BREADTH_NOT_READY"
   | "DAILY_BREADTH_WEAK"
+  | "KOSPI_INDEX_NOT_READY"
+  | "KOSPI_INDEX_DOWN"
   | "INTRADAY_BREADTH_NOT_READY"
   | "INTRADAY_BREADTH_WEAK"
   | "MARKET_HEALTHY";
@@ -19,6 +21,7 @@ export interface MarketRegimeSnapshot {
   dailyAboveLongMaBps: number | null;
   intradaySampleCount: number;
   intradayAdvancingBps: number | null;
+  kospiIndex: KospiIndexSnapshot | null;
   checkedAt: string;
 }
 
@@ -28,6 +31,7 @@ export interface MarketRegimeEvaluationInput {
   dailyAboveLongMaCount: number;
   intradaySampleCount: number;
   intradayAdvancingCount: number;
+  kospiIndex: KospiIndexSnapshot | null;
   requireIntradayEvidence: boolean;
   checkedAt: string;
 }
@@ -58,6 +62,7 @@ export function evaluateMarketRegime(
     dailyAboveLongMaBps,
     intradaySampleCount: input.intradaySampleCount,
     intradayAdvancingBps,
+    kospiIndex: input.kospiIndex,
     checkedAt: input.checkedAt,
   };
 
@@ -68,6 +73,24 @@ export function evaluateMarketRegime(
       buyAllowed: true,
       reasonCode: "FILTER_DISABLED",
     };
+  }
+  if (input.requireIntradayEvidence && input.settings.blockWhenKospiDown) {
+    if (input.kospiIndex === null) {
+      return {
+        ...base,
+        status: "WAITING_FOR_DATA",
+        buyAllowed: false,
+        reasonCode: "KOSPI_INDEX_NOT_READY",
+      };
+    }
+    if (input.kospiIndex.direction === "DOWN" || input.kospiIndex.changeRateBps < 0) {
+      return {
+        ...base,
+        status: "WEAK",
+        buyAllowed: false,
+        reasonCode: "KOSPI_INDEX_DOWN",
+      };
+    }
   }
   if (
     input.dailySampleCount < input.settings.minimumSampleSize ||

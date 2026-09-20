@@ -37,6 +37,18 @@ export interface MarketCalendarDay {
   isOpen: boolean;
 }
 
+/** A broker-sourced snapshot of the official KOSPI composite index. */
+export interface KospiIndexSnapshot {
+  indexCode: "KOSPI";
+  currentValue: number;
+  change: number;
+  changeRateBps: number;
+  direction: "UP" | "FLAT" | "DOWN";
+  tradingDate: string;
+  observedAt: string;
+  source: BrokerId;
+}
+
 export interface Quote {
   symbol: string;
   price: number;

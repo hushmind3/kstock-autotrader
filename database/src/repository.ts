@@ -1111,7 +1111,49 @@ export class TradingRepository {
     assertNonNegativeInteger("tax", tax);
 
     const record = this.database.transaction(() => {
+      const receivedAt = input.receivedAt ?? toIsoDateTime();
       let execution = input.execution;
+
+      // Older Kiwoom ka10076 responses had no trading-date field. If that
+      // response was replayed after midnight, the requested date could place
+      // the synthetic execution after the time it was received. When a real
+      // account-stream fill already exists, keep that durable fill and ignore
+      // the delayed replay instead of creating a second position change.
+      if (execution.syntheticExecutionId === true) {
+        const executedMs = Date.parse(execution.executedAt);
+        const receivedMs = Date.parse(receivedAt);
+        if (
+          Number.isFinite(executedMs) &&
+          Number.isFinite(receivedMs) &&
+          executedMs > receivedMs + 60_000
+        ) {
+          const overlapping = this.database
+            .prepare(
+              `SELECT * FROM fills
+               WHERE broker_id = ? AND environment = ? AND account_id = ?
+                 AND broker_order_id = ? AND symbol = ? AND side = ?
+                 AND quantity = ? AND price_krw = ?
+                 AND broker_execution_id NOT LIKE 'ka10076:%'
+               ORDER BY received_at DESC LIMIT 1`,
+            )
+            .get(
+              ...scopeParameters(input.scope),
+              execution.brokerOrderId,
+              execution.symbol,
+              execution.side,
+              execution.quantity,
+              execution.price,
+            ) as SqlRow | undefined;
+          if (overlapping) {
+            const fill = mapFill(overlapping);
+            return {
+              inserted: false,
+              fill,
+              order: this.requireOrder(fill.orderId, input.scope),
+            };
+          }
+        }
+      }
       if (execution.cumulativeQuantity !== undefined) {
         const aggregate = this.database
           .prepare(
@@ -1266,7 +1308,6 @@ export class TradingRepository {
         }
       }
       if (!order) {
-        const receivedAt = input.receivedAt ?? toIsoDateTime();
         const externalOrderedQuantity =
           execution.cumulativeQuantity ?? execution.quantity;
         const externalStatus: OrderStatus =
@@ -1313,7 +1354,6 @@ export class TradingRepository {
           id: execution.executionId,
           tradingDate: execution.executedAt.slice(0, 10),
         }).slice(0, 40)}`;
-      const receivedAt = input.receivedAt ?? toIsoDateTime();
       this.database
         .prepare(
           `INSERT INTO fills (
@@ -1410,6 +1450,11 @@ export class TradingRepository {
     options: { since?: string; orderId?: string; limit?: number } = {},
   ): FillRecord[] {
     const where = ["broker_id = ?", "environment = ?", "account_id = ?"];
+    // Keep the raw row for audit, but do not expose a known delayed ka10076
+    // replay to positions, P&L, FIFO pairing or the web UI.
+    where.push(
+      "NOT (broker_execution_id LIKE 'ka10076:%' AND julianday(executed_at) > julianday(received_at) + (60.0 / 86400.0))",
+    );
     const parameters: unknown[] = [...scopeParameters(scope)];
     if (options.since) {
       where.push("executed_at >= ?");

@@ -6,6 +6,7 @@ import {
   type AccountScope,
   type BrokerAdapter,
   type Instrument,
+  type KospiIndexSnapshot,
   type MarketRegimeSettings,
   type Quote,
 } from "@kstock/shared";
@@ -36,6 +37,9 @@ export interface MarketDataMetrics {
   backfillTotal: number;
   marketRegime: MarketRegimeSnapshot;
 }
+
+const KOSPI_INDEX_POLL_INTERVAL_MS = 10_000;
+const KOSPI_INDEX_MAX_AGE_MS = 45_000;
 
 export interface MarketDataServiceOptions {
   getRuntimes: () => MarketRuntimeView[];
@@ -89,6 +93,8 @@ export class MarketDataService {
   #lastIntradayPrunedAt = 0;
   #dailyRegimeSampleCount = 0;
   #dailyAboveLongMaCount = 0;
+  #kospiIndex: KospiIndexSnapshot | null = null;
+  #lastKospiIndexErrorAt = 0;
   #metrics: MarketDataMetrics = {
     universeCount: 0,
     buyEligibleCount: 0,
@@ -109,6 +115,7 @@ export class MarketDataService {
       dailyAboveLongMaCount: 0,
       intradaySampleCount: 0,
       intradayAdvancingCount: 0,
+      kospiIndex: null,
       requireIntradayEvidence: false,
       checkedAt: toIsoDateTime(),
     }),
@@ -144,6 +151,7 @@ export class MarketDataService {
     await this.stop();
     this.#controller = new AbortController();
     this.#dailyBarsReady.clear();
+    this.#kospiIndex = null;
     this.resetIntradayMarketRegimeIfNeeded();
     this.refreshDailyMarketRegime();
     this.updateMarketRegimeMetric();
@@ -178,6 +186,7 @@ export class MarketDataService {
     };
     void this.backfillDailyBars(backfillRuntime, signal);
     for (const runtime of runtimes) void this.quoteSweepLoop(runtime, signal);
+    void this.kospiIndexLoop(signal);
     void this.universeRefreshLoop(backfillRuntime, signal);
   }
 
@@ -582,15 +591,28 @@ export class MarketDataService {
     const intradayAdvancingCount = [...this.#intradayBreadth.values()]
       .filter((observation) => observation.advancing).length;
     const previous = this.#metrics.marketRegime;
+    const requireIntradayEvidence = this.options
+      .getRuntimes()
+      .some((runtime) => this.options.isMarketOpen(runtime.adapter));
+    const now = Date.now();
+    const kospiObservedAt = this.#kospiIndex === null
+      ? Number.NaN
+      : Date.parse(this.#kospiIndex.observedAt);
+    const kospiIndex = this.#kospiIndex !== null &&
+      this.#kospiIndex.tradingDate === this.#intradayTradingDate &&
+      Number.isFinite(kospiObservedAt) &&
+      kospiObservedAt <= now + 5_000 &&
+      now - kospiObservedAt <= KOSPI_INDEX_MAX_AGE_MS
+      ? this.#kospiIndex
+      : null;
     const current = evaluateMarketRegime({
       settings: this.marketRegimeSettings(),
       dailySampleCount: this.#dailyRegimeSampleCount,
       dailyAboveLongMaCount: this.#dailyAboveLongMaCount,
       intradaySampleCount: this.#intradayBreadth.size,
       intradayAdvancingCount,
-      requireIntradayEvidence: this.options
-        .getRuntimes()
-        .some((runtime) => this.options.isMarketOpen(runtime.adapter)),
+      kospiIndex,
+      requireIntradayEvidence,
       checkedAt: toIsoDateTime(),
     });
     this.#metrics.marketRegime = current;
@@ -600,6 +622,39 @@ export class MarketDataService {
       current.reasonCode !== previous.reasonCode
     ) {
       this.options.onMarketRegimeChange?.(current, previous);
+    }
+  }
+
+  private async kospiIndexLoop(signal: AbortSignal): Promise<void> {
+    while (!signal.aborted) {
+      const connected = this.options.getRuntimes().filter((runtime) =>
+        runtime.adapter.fetchKospiIndex !== undefined &&
+        runtime.adapter.getHealth().state === "CONNECTED");
+      const provider = connected.find((runtime) => this.options.isMarketOpen(runtime.adapter))
+        ?? connected[0];
+      const marketOpen = provider !== undefined && this.options.isMarketOpen(provider.adapter);
+      // Fetch once after startup even outside order hours. Besides making the
+      // last official close visible, this verifies the live broker endpoint.
+      // Once closed, do not keep spending requests on an unchanged index.
+      if (
+        provider?.adapter.fetchKospiIndex !== undefined &&
+        (marketOpen || this.#kospiIndex === null)
+      ) {
+        try {
+          this.#kospiIndex = await provider.adapter.fetchKospiIndex();
+          this.updateMarketRegimeMetric();
+        } catch (error) {
+          const now = Date.now();
+          if (now - this.#lastKospiIndexErrorAt >= 60_000) {
+            this.#lastKospiIndexErrorAt = now;
+            this.options.onError(error, "kospi-index", provider.adapter);
+          }
+          this.updateMarketRegimeMetric();
+        }
+      } else {
+        this.updateMarketRegimeMetric();
+      }
+      await delay(marketOpen ? KOSPI_INDEX_POLL_INTERVAL_MS : 30_000, signal);
     }
   }
 

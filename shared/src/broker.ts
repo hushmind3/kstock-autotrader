@@ -12,6 +12,7 @@ import type {
   DailyBar,
   Exchange,
   Instrument,
+  KospiIndexSnapshot,
   MarketCalendarDay,
   OrderSubmissionResult,
   PlaceOrderRequest,
@@ -41,6 +42,8 @@ export interface BrokerAdapter {
 
   fetchInstruments(): Promise<Instrument[]>;
   fetchMarketCalendar?(fromDate: string, requestedDays: number): Promise<MarketCalendarDay[]>;
+  /** Official KOSPI composite index, used only as a market-wide new-buy gate. */
+  fetchKospiIndex?(): Promise<KospiIndexSnapshot>;
   fetchDailyBars(symbol: string, requiredCount: number): Promise<DailyBar[]>;
   fetchQuote(symbol: string): Promise<Quote>;
   fetchQuotes?(symbols: string[]): Promise<Quote[]>;

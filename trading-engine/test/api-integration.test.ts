@@ -2,7 +2,11 @@ import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { createInMemoryTradingRepository, type TradingRepository } from "@kstock/database";
+import {
+  createInMemoryTradingRepository,
+  type FillRecord,
+  type TradingRepository,
+} from "@kstock/database";
 import {
   createDefaultSettings,
   type AccountSnapshot,
@@ -320,6 +324,294 @@ describe("trading-engine API integration", () => {
     expect(startWithoutBroker.statusCode).toBe(409);
     expect(startWithoutBroker.json().message).toBe("자동매매를 시작할 증권사를 지정해 주세요.");
   }, 10_000);
+
+  it("serves persisted fill details needed to audit actual buys and sells", async () => {
+    const { adapters } = await startConnectedEngine();
+    const executedAt = new Date().toISOString();
+    const boughtAt = new Date(Date.parse(executedAt) - 60_000).toISOString();
+    repository!.upsertInstruments([{
+      symbol: "005930",
+      name: "삼성전자",
+      market: "KOSPI",
+      exchange: "KRX",
+      active: true,
+    }]);
+    repository!.recordExecution({
+      scope: adapters.kiwoom.scope,
+      execution: {
+        executionId: "audit-fill-buy",
+        brokerOrderId: "audit-order-buy",
+        symbol: "005930",
+        side: "buy",
+        quantity: 3,
+        price: 71_500,
+        exchange: "KRX",
+        executedAt: boughtAt,
+      },
+      fee: 100,
+      tax: 0,
+    });
+    repository!.recordExecution({
+      scope: adapters.kiwoom.scope,
+      execution: {
+        executionId: "audit-fill-1",
+        brokerOrderId: "audit-order-1",
+        symbol: "005930",
+        side: "sell",
+        quantity: 3,
+        price: 72_100,
+        exchange: "NXT",
+        executedAt,
+      },
+      fee: 120,
+      tax: 650,
+    });
+
+    const response = await api!.inject({
+      method: "GET",
+      url: "/api/dashboard",
+      headers: { "x-kstock-admin-token": "integration-test-admin-token-32-characters" },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().executions).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        brokerId: "kiwoom",
+        environment: "live",
+        accountIdMasked: "****5678",
+        brokerExecutionId: "audit-fill-1",
+        brokerOrderId: "audit-order-1",
+        symbol: "005930",
+        name: "삼성전자",
+        side: "sell",
+        quantity: 3,
+        price: 72_100,
+        grossAmount: 216_300,
+        fee: 120,
+        tax: 650,
+        exchange: "NXT",
+        realizedPnl: null,
+        executedAt,
+      }),
+    ]));
+    expect(response.json().orders).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        brokerId: "kiwoom",
+        brokerOrderId: "audit-order-1",
+        orderedAt: executedAt,
+      }),
+    ]));
+    expect(response.json().recentExecutions).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        brokerExecutionId: "audit-fill-1",
+        name: "삼성전자",
+        side: "sell",
+        grossAmount: 216_300,
+        fee: 120,
+        tax: 650,
+        exchange: "NXT",
+      }),
+    ]));
+    expect(response.json().executionTrades).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        brokerId: "kiwoom",
+        accountIdMasked: "****5678",
+        symbol: "005930",
+        status: "matched",
+        quantity: 3,
+        buy: expect.objectContaining({
+          quantity: 3,
+          execution: expect.objectContaining({
+            brokerExecutionId: "audit-fill-buy",
+            executedAt: boughtAt,
+          }),
+        }),
+        sell: expect.objectContaining({
+          quantity: 3,
+          execution: expect.objectContaining({
+            brokerExecutionId: "audit-fill-1",
+            executedAt,
+          }),
+        }),
+      }),
+    ]));
+    expect(response.json().executionTradeCoverage).toMatchObject({
+      activeAccountCount: 1,
+      pairedAccountCount: 1,
+      unavailableAccountCount: 0,
+      sourceExecutionCount: 2,
+      sourceLimitPerAccount: 20_000,
+      sourceHistoryComplete: true,
+      totalPairCount: 1,
+      returnedPairCount: 1,
+    });
+  });
+
+  it("pairs from the full ledger read before limiting recent executions to 500", async () => {
+    const { adapters } = await startConnectedEngine();
+    const scope = adapters.kiwoom.scope;
+    const base = Date.parse("2026-09-01T00:00:00.000Z");
+    const makeFill = (input: {
+      index: number;
+      symbol: string;
+      side: "buy" | "sell";
+    }): FillRecord => ({
+      id: `ledger-fill-${input.index}`,
+      scope,
+      orderId: `ledger-order-${input.index}`,
+      brokerExecutionId: `ledger-execution-${input.index}`,
+      brokerOrderId: `ledger-broker-order-${input.index}`,
+      symbol: input.symbol,
+      side: input.side,
+      quantity: 1,
+      price: 70_000 + input.index,
+      fee: 0,
+      tax: 0,
+      executedAt: new Date(base + input.index * 1_000).toISOString(),
+      receivedAt: new Date(base + input.index * 1_000 + 100).toISOString(),
+      raw: null,
+    });
+    const chronological = [
+      makeFill({ index: 0, symbol: "005930", side: "buy" }),
+      ...Array.from({ length: 500 }, (_, offset) =>
+        makeFill({ index: offset + 1, symbol: "000660", side: "buy" }),
+      ),
+      makeFill({ index: 501, symbol: "005930", side: "sell" }),
+    ];
+    const newestFirst = chronological.toReversed();
+    vi.spyOn(repository!, "listFills").mockImplementation((requestedScope, options = {}) => {
+      if (requestedScope.brokerId !== scope.brokerId
+        || requestedScope.environment !== scope.environment
+        || requestedScope.accountId !== scope.accountId) return [];
+      return newestFirst.slice(0, options.limit ?? 1_000);
+    });
+
+    const response = await api!.inject({
+      method: "GET",
+      url: "/api/dashboard",
+      headers: { "x-kstock-admin-token": "integration-test-admin-token-32-characters" },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const payload = response.json();
+    expect(payload.recentExecutions).toHaveLength(500);
+    expect(payload.recentExecutions).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ brokerExecutionId: "ledger-execution-0" }),
+    ]));
+    expect(payload.executionTrades).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        status: "matched",
+        symbol: "005930",
+        quantity: 1,
+        buy: expect.objectContaining({
+          execution: expect.objectContaining({ brokerExecutionId: "ledger-execution-0" }),
+        }),
+        sell: expect.objectContaining({
+          execution: expect.objectContaining({ brokerExecutionId: "ledger-execution-501" }),
+        }),
+      }),
+    ]));
+    expect(payload.executionTradeCoverage).toMatchObject({
+      sourceExecutionCount: 502,
+      pairedAccountCount: 1,
+      unavailableAccountCount: 0,
+      sourceHistoryComplete: true,
+      totalPairCount: 501,
+      returnedPairCount: 500,
+    });
+  });
+
+  it("does not invent FIFO matches when an account reaches the history read cap", async () => {
+    const { adapters } = await startConnectedEngine();
+    const scope = adapters.kiwoom.scope;
+    const cappedFills = Array.from({ length: 20_000 }, (_, index): FillRecord => ({
+      id: `capped-fill-${index}`,
+      scope,
+      orderId: `capped-order-${index}`,
+      brokerExecutionId: `capped-execution-${index}`,
+      brokerOrderId: `capped-broker-order-${index}`,
+      symbol: "005930",
+      side: index === 19_999 ? "sell" : "buy",
+      quantity: 1,
+      price: 70_000,
+      fee: 0,
+      tax: 0,
+      executedAt: new Date(Date.parse("2025-01-01T00:00:00.000Z") + index * 1_000).toISOString(),
+      receivedAt: new Date(Date.parse("2025-01-01T00:00:00.000Z") + index * 1_000 + 100).toISOString(),
+      raw: null,
+    })).toReversed();
+    vi.spyOn(repository!, "listFills").mockImplementation((requestedScope, options = {}) => {
+      if (requestedScope.brokerId !== scope.brokerId
+        || requestedScope.environment !== scope.environment
+        || requestedScope.accountId !== scope.accountId) return [];
+      return cappedFills.slice(0, options.limit ?? 1_000);
+    });
+
+    const response = await api!.inject({
+      method: "GET",
+      url: "/api/dashboard",
+      headers: { "x-kstock-admin-token": "integration-test-admin-token-32-characters" },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      executionTrades: [],
+      executionTradeCoverage: {
+        activeAccountCount: 1,
+        pairedAccountCount: 0,
+        unavailableAccountCount: 1,
+        sourceExecutionCount: 20_000,
+        sourceLimitPerAccount: 20_000,
+        sourceHistoryComplete: false,
+        totalPairCount: 0,
+        returnedPairCount: 0,
+      },
+    });
+  });
+
+  it("sorts orders by the broker order time instead of local row creation time", async () => {
+    const { adapters } = await startConnectedEngine();
+    const newerOrderedAt = new Date().toISOString();
+    const olderOrderedAt = new Date(Date.parse(newerOrderedAt) - 1_000).toISOString();
+    repository!.recordExecution({
+      scope: adapters.kiwoom.scope,
+      execution: {
+        executionId: "newer-order-fill",
+        brokerOrderId: "newer-broker-order",
+        symbol: "005930",
+        side: "buy",
+        quantity: 1,
+        price: 70_000,
+        executedAt: newerOrderedAt,
+      },
+      receivedAt: new Date(Date.parse(newerOrderedAt) + 1_000).toISOString(),
+    });
+    repository!.recordExecution({
+      scope: adapters.kiwoom.scope,
+      execution: {
+        executionId: "older-order-fill",
+        brokerOrderId: "older-broker-order",
+        symbol: "005930",
+        side: "buy",
+        quantity: 1,
+        price: 69_900,
+        executedAt: olderOrderedAt,
+      },
+      // This older broker order arrives later and therefore has a newer DB row.
+      receivedAt: new Date(Date.parse(newerOrderedAt) + 2_000).toISOString(),
+    });
+
+    const response = await api!.inject({
+      method: "GET",
+      url: "/api/dashboard",
+      headers: { "x-kstock-admin-token": "integration-test-admin-token-32-characters" },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().orders.slice(0, 2).map((order: { brokerOrderId: string }) =>
+      order.brokerOrderId,
+    )).toEqual(["newer-broker-order", "older-broker-order"]);
+  });
 
   it("arms one broker before market-status confirmation while preserving final order gates", async () => {
     await startConnectedEngine({}, (settings) => {

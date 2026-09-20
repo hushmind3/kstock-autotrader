@@ -64,6 +64,8 @@ export interface DashboardResponse {
         | "FILTER_DISABLED"
         | "DAILY_BREADTH_NOT_READY"
         | "DAILY_BREADTH_WEAK"
+        | "KOSPI_INDEX_NOT_READY"
+        | "KOSPI_INDEX_DOWN"
         | "INTRADAY_BREADTH_NOT_READY"
         | "INTRADAY_BREADTH_WEAK"
         | "MARKET_HEALTHY";
@@ -71,6 +73,16 @@ export interface DashboardResponse {
       dailyAboveLongMaBps: number | null;
       intradaySampleCount: number;
       intradayAdvancingBps: number | null;
+      kospiIndex: {
+        indexCode: "KOSPI";
+        currentValue: number;
+        change: number;
+        changeRateBps: number;
+        direction: "UP" | "FLAT" | "DOWN";
+        tradingDate: string;
+        observedAt: string;
+        source: BrokerId;
+      } | null;
       checkedAt: string;
     };
   };
@@ -89,6 +101,11 @@ export interface DashboardResponse {
   positions: PositionRow[];
   orders: OrderRow[];
   executions: ExecutionRow[];
+  /** Most recent persisted executions across trading dates, newest first. */
+  recentExecutions?: ExecutionRow[];
+  /** Server-computed FIFO lots; matching is performed per real, unmasked account scope. */
+  executionTrades?: ExecutionTradePair[];
+  executionTradeCoverage?: ExecutionTradeCoverage;
   errors: ErrorRow[];
 }
 
@@ -174,6 +191,7 @@ export interface OrderRow {
   id: string;
   brokerId: BrokerId;
   environment: "live" | "paper";
+  brokerOrderId: string | null;
   symbol: string;
   name: string;
   side: "buy" | "sell";
@@ -183,18 +201,70 @@ export interface OrderRow {
   limitPrice: number | null;
   status: string;
   exchange?: "KRX" | "NXT" | "SOR";
+  /** Broker/order-event timestamp; use this when showing when the order was placed. */
+  orderedAt: string;
+  /** Local database row creation timestamp, retained for diagnostics. */
   createdAt: string;
 }
 
 export interface ExecutionRow {
   id: string;
   brokerId: BrokerId;
+  environment: "live" | "paper";
+  accountIdMasked: string;
+  brokerExecutionId: string;
+  brokerOrderId: string;
   symbol: string;
   name: string;
   side: "buy" | "sell";
   quantity: number;
   price: number;
+  grossAmount: number | null;
+  fee: number;
+  tax: number;
+  exchange: "KRX" | "NXT" | "SOR" | null;
+  realizedPnl: number | null;
   executedAt: string;
+}
+
+export type ExecutionTradeStatus = "matched" | "open-buy" | "unmatched-sell";
+
+export interface ExecutionTradeLeg {
+  execution: ExecutionRow;
+  /** Quantity from this real execution allocated to this FIFO lot. */
+  quantity: number;
+}
+
+export interface ExecutionTradePair {
+  id: string;
+  brokerId: BrokerId;
+  environment: "live" | "paper";
+  accountIdMasked: string;
+  symbol: string;
+  name: string;
+  status: ExecutionTradeStatus;
+  quantity: number;
+  buy: ExecutionTradeLeg | null;
+  sell: ExecutionTradeLeg | null;
+  activityAt: string;
+}
+
+export interface ExecutionTradeCoverage {
+  /** Number of currently active real account scopes included in this response. */
+  activeAccountCount: number;
+  /** Accounts whose stored history was complete enough to pair safely. */
+  pairedAccountCount: number;
+  /** Accounts omitted from pairing because their history reached the read cap. */
+  unavailableAccountCount: number;
+  /** Number of persisted executions read before pairing. */
+  sourceExecutionCount: number;
+  /** Conservative repository read cap, applied separately to each account scope. */
+  sourceLimitPerAccount: number;
+  /** False when any account reached the cap, because older executions may exist. */
+  sourceHistoryComplete: boolean;
+  /** Pair/open-lot count before the response display cap. */
+  totalPairCount: number;
+  returnedPairCount: number;
 }
 
 export interface ErrorRow {
@@ -217,6 +287,7 @@ export interface SettingsResponse {
     quoteSweepIntervalMs: number;
     marketRegime: {
       enabled: boolean;
+      blockWhenKospiDown: boolean;
       longPeriod: number;
       minimumAboveLongMaBps: number;
       minimumIntradayAdvancingBps: number;

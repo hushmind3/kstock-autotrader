@@ -19,6 +19,7 @@ export const KIS_PATHS = {
   approval: "/oauth2/Approval",
   hashkey: "/uapi/hashkey",
   currentPrice: "/uapi/domestic-stock/v1/quotations/inquire-price",
+  indexPrice: "/uapi/domestic-stock/v1/quotations/inquire-index-price",
   dailyBars:
     "/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
   multiPrice: "/uapi/domestic-stock/v1/quotations/intstock-multprice",
@@ -61,6 +62,7 @@ export const KIS_TR_IDS = {
     accountNotice: "H0STCNI9",
   },
   quote: "FHKST01010100",
+  indexPrice: "FHPUP02100000",
   dailyBars: "FHKST03010100",
   multiPrice: "FHKST11300006",
   realtimeTrade: "H0STCNT0",

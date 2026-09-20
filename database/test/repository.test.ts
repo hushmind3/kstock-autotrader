@@ -448,6 +448,98 @@ describe("TradingRepository order ledger", () => {
     expect(overlap.order.filledQuantity).toBe(2);
   });
 
+  it("ignores a delayed ka10076 replay when the real-time fill is already stored", () => {
+    const repo = repository();
+    repo.createOrderIntent({
+      id: "intent-synthetic-replay",
+      orderId: "order-synthetic-replay",
+      outboxId: "outbox-synthetic-replay",
+      scope,
+      idempotencyKey: "decision-synthetic-replay",
+      request: { ...request, clientOrderId: "client-synthetic-replay", quantity: 2 },
+      createdAt: "2026-09-04T03:23:49.000Z",
+    });
+    repo.applyOrderEvent({
+      scope,
+      orderId: "order-synthetic-replay",
+      dedupeKey: "ack-synthetic-replay",
+      eventType: "BROKER_ACK",
+      toStatus: "ACKED",
+      eventAt: "2026-09-04T03:23:50.000Z",
+      brokerOrderId: "broker-synthetic-replay",
+    });
+    const real = repo.recordExecution({
+      scope,
+      execution: {
+        executionId: "stream-fill-replay",
+        brokerOrderId: "broker-synthetic-replay",
+        symbol: "005930",
+        side: "buy",
+        quantity: 2,
+        price: 100,
+        executedAt: "2026-09-04T03:23:50.000Z",
+      },
+      receivedAt: "2026-09-04T03:23:50.100Z",
+    });
+    const replay = repo.recordExecution({
+      scope,
+      execution: {
+        executionId: "ka10076:20260905:broker-synthetic-replay:122350:100:2",
+        syntheticExecutionId: true,
+        brokerOrderId: "broker-synthetic-replay",
+        symbol: "005930",
+        side: "buy",
+        quantity: 2,
+        price: 100,
+        executedAt: "2026-09-05T03:23:50.000Z",
+      },
+      receivedAt: "2026-09-04T15:00:29.000Z",
+    });
+
+    expect(real.inserted).toBe(true);
+    expect(replay.inserted).toBe(false);
+    expect(replay.fill?.brokerExecutionId).toBe("stream-fill-replay");
+    expect(repo.listFills(scope, { orderId: "order-synthetic-replay" })).toHaveLength(1);
+  });
+
+  it("does not show a previously stored delayed ka10076 replay in the fill ledger", () => {
+    const repo = repository();
+    repo.createOrderIntent({
+      id: "intent-stale-synthetic",
+      orderId: "order-stale-synthetic",
+      outboxId: "outbox-stale-synthetic",
+      scope,
+      idempotencyKey: "decision-stale-synthetic",
+      request: { ...request, clientOrderId: "client-stale-synthetic", quantity: 2 },
+      createdAt: "2026-09-04T03:23:49.000Z",
+    });
+    repo.applyOrderEvent({
+      scope,
+      orderId: "order-stale-synthetic",
+      dedupeKey: "ack-stale-synthetic",
+      eventType: "BROKER_ACK",
+      toStatus: "ACKED",
+      eventAt: "2026-09-04T03:23:50.000Z",
+      brokerOrderId: "broker-stale-synthetic",
+    });
+    repo.recordExecution({
+      scope,
+      execution: {
+        executionId: "ka10076:20260905:broker-stale-synthetic:122350:100:2",
+        syntheticExecutionId: true,
+        brokerOrderId: "broker-stale-synthetic",
+        symbol: "005930",
+        side: "buy",
+        quantity: 2,
+        price: 100,
+        executedAt: "2026-09-05T03:23:50.000Z",
+      },
+      receivedAt: "2026-09-04T15:00:29.000Z",
+    });
+
+    expect(repo.listFills(scope, { orderId: "order-stale-synthetic" })).toEqual([]);
+  });
+
   it("records a late fill without reopening an already canceled order", () => {
     const repo = repository();
     repo.createOrderIntent({

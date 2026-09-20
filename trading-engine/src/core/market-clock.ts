@@ -62,7 +62,11 @@ interface VenueSchedule {
   id: MarketVenueId;
   label: string;
   kind: MarketVenueSession["kind"];
-  periods: readonly SessionPeriod[];
+  versions: readonly {
+    /** First Korean trading date which uses this version (YYYY-MM-DD). */
+    effectiveFrom: string;
+    periods: readonly SessionPeriod[];
+  }[];
 }
 
 const SECOND = 1_000;
@@ -82,43 +86,82 @@ const CURRENT_SCHEDULES: readonly VenueSchedule[] = [
     id: "KRX_EQUITY",
     label: "KRX 현물",
     kind: "equity",
-    periods: [
-      { startSecond: at(8, 30), endSecond: at(9), state: "PREOPEN", phase: "OPENING_AUCTION", orderable: false },
-      { startSecond: at(9), endSecond: at(15, 30), state: "OPEN", phase: "REGULAR", orderable: true },
-      { startSecond: at(15, 30), endSecond: at(18), state: "AFTER_HOURS", phase: "AFTER_HOURS", orderable: false },
+    versions: [
+      {
+        effectiveFrom: "1970-01-01",
+        periods: [
+          { startSecond: at(8, 30), endSecond: at(9), state: "PREOPEN", phase: "OPENING_AUCTION", orderable: false },
+          { startSecond: at(9), endSecond: at(15, 30), state: "OPEN", phase: "REGULAR", orderable: true },
+          { startSecond: at(15, 30), endSecond: at(18), state: "AFTER_HOURS", phase: "AFTER_HOURS", orderable: false },
+        ],
+      },
+      {
+        effectiveFrom: "2026-09-14",
+        periods: [
+          { startSecond: at(8, 30), endSecond: at(9), state: "PREOPEN", phase: "OPENING_AUCTION", orderable: false },
+          { startSecond: at(9), endSecond: at(15, 30), state: "OPEN", phase: "REGULAR", orderable: true },
+          { startSecond: at(15, 30), endSecond: at(16), state: "AFTER_HOURS", phase: "CLOSING_PRICE", orderable: false },
+          { startSecond: at(16), endSecond: at(20), state: "OPEN", phase: "AFTER_MARKET", orderable: true },
+        ],
+      },
     ],
   },
   {
     id: "NXT_EQUITY",
     label: "NXT 현물",
     kind: "equity",
-    periods: [
-      { startSecond: at(8), endSecond: at(8, 50), state: "OPEN", phase: "PRE_MARKET", orderable: true },
-      { startSecond: at(8, 50), endSecond: at(9, 0, 30), state: "BREAK", phase: "OPENING_AUCTION_BREAK", orderable: false },
-      { startSecond: at(9, 0, 30), endSecond: at(15, 20), state: "OPEN", phase: "MAIN_MARKET", orderable: true },
-      { startSecond: at(15, 20), endSecond: at(15, 40), state: "BREAK", phase: "CLOSING_AUCTION_BREAK", orderable: false },
-      { startSecond: at(15, 40), endSecond: at(20), state: "OPEN", phase: "AFTER_MARKET", orderable: true },
+    versions: [
+      {
+        effectiveFrom: "1970-01-01",
+        periods: [
+          { startSecond: at(8), endSecond: at(8, 50), state: "OPEN", phase: "PRE_MARKET", orderable: true },
+          { startSecond: at(8, 50), endSecond: at(9, 0, 30), state: "BREAK", phase: "OPENING_AUCTION_BREAK", orderable: false },
+          { startSecond: at(9, 0, 30), endSecond: at(15, 20), state: "OPEN", phase: "MAIN_MARKET", orderable: true },
+          { startSecond: at(15, 20), endSecond: at(15, 40), state: "BREAK", phase: "CLOSING_AUCTION_BREAK", orderable: false },
+          { startSecond: at(15, 40), endSecond: at(20), state: "OPEN", phase: "AFTER_MARKET", orderable: true },
+        ],
+      },
     ],
   },
   {
     id: "KRX_DERIVATIVES_DAY",
     label: "코스피200 선물 주간",
     kind: "derivatives",
-    periods: [
-      { startSecond: at(8, 30), endSecond: at(8, 45), state: "PREOPEN", phase: "OPENING_AUCTION", orderable: false },
-      { startSecond: at(8, 45), endSecond: at(15, 45), state: "OPEN", phase: "DAY_SESSION", orderable: true },
+    versions: [
+      {
+        effectiveFrom: "1970-01-01",
+        periods: [
+          { startSecond: at(8, 30), endSecond: at(8, 45), state: "PREOPEN", phase: "OPENING_AUCTION", orderable: false },
+          { startSecond: at(8, 45), endSecond: at(15, 45), state: "OPEN", phase: "DAY_SESSION", orderable: true },
+        ],
+      },
     ],
   },
   {
     id: "KRX_DERIVATIVES_NIGHT",
     label: "코스피200 선물 야간",
     kind: "derivatives",
-    periods: [
-      { startSecond: at(17, 50), endSecond: at(18), state: "PREOPEN", phase: "OPENING_AUCTION", orderable: false },
-      { startSecond: at(18), endSecond: DAY_SECONDS + at(6), state: "OPEN", phase: "NIGHT_SESSION", orderable: true },
+    versions: [
+      {
+        effectiveFrom: "1970-01-01",
+        periods: [
+          { startSecond: at(17, 50), endSecond: at(18), state: "PREOPEN", phase: "OPENING_AUCTION", orderable: false },
+          { startSecond: at(18), endSecond: DAY_SECONDS + at(6), state: "OPEN", phase: "NIGHT_SESSION", orderable: true },
+        ],
+      },
     ],
   },
 ] as const;
+
+function periodsForTradingDate(
+  schedule: VenueSchedule,
+  tradingDate: string,
+): readonly SessionPeriod[] {
+  const version = [...schedule.versions]
+    .reverse()
+    .find((candidate) => candidate.effectiveFrom <= tradingDate);
+  return version?.periods ?? [];
+}
 
 function koreanParts(now: Date): KoreanParts {
   const parts = new Intl.DateTimeFormat("en-US", {
@@ -187,6 +230,21 @@ export class MarketClock {
     if (brokerStatus?.tradingDate === tradingDate) {
       sessions = sessions.map((session) => {
         if (session.id !== "KRX_EQUITY") return session;
+        // KRX reopens at 16:00 from 2026-09-14. The regular-close event seen
+        // at 15:30 belongs to the preceding closing-price phase and must not
+        // keep the new after-market closed. Kiwoom also reports its orderable
+        // after-hours phases as AFTER_HOURS rather than OPEN, so the
+        // effective-dated exchange schedule remains authoritative here.
+        if (session.phase === "AFTER_MARKET") {
+          const afterMarketStartedAt = new Date(`${session.tradingDate}T16:00:00+09:00`);
+          const observedAt = new Date(brokerStatus.observedAt);
+          if (
+            observedAt < afterMarketStartedAt ||
+            brokerStatus.state === "AFTER_HOURS"
+          ) {
+            return session;
+          }
+        }
         // An OPEN message cannot extend configured hours. A non-open official
         // state may always close the KRX route fail-safely.
         if (brokerStatus.state === "OPEN" && !session.orderable) return session;
@@ -345,7 +403,7 @@ export class MarketClock {
       const baseStart = plusDays(todayStart, dayOffset);
       const baseDate = ymd(koreanParts(baseStart));
       if (!this.#isTradingDate(baseDate)) continue;
-      for (const period of schedule.periods) {
+      for (const period of periodsForTradingDate(schedule, baseDate)) {
         const start = new Date(baseStart.getTime() + period.startSecond * SECOND);
         const end = new Date(baseStart.getTime() + period.endSecond * SECOND);
         if (now >= start && now < end) active = { period, baseDate, end };

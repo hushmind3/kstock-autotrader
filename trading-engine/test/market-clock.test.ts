@@ -105,6 +105,60 @@ describe("MarketClock", () => {
     expect(session.sessions.find((item) => item.id === "NXT_EQUITY")?.phase).toBe("AFTER_MARKET");
   });
 
+  it.each([
+    ["2026-09-14T06:29:59.000Z", "OPEN", "REGULAR", true, "2026-09-14T06:30:00.000Z"],
+    ["2026-09-14T06:30:00.000Z", "AFTER_HOURS", "CLOSING_PRICE", false, "2026-09-14T07:00:00.000Z"],
+    ["2026-09-14T06:59:59.000Z", "AFTER_HOURS", "CLOSING_PRICE", false, "2026-09-14T07:00:00.000Z"],
+    ["2026-09-14T07:00:00.000Z", "OPEN", "AFTER_MARKET", true, "2026-09-14T11:00:00.000Z"],
+    ["2026-09-14T10:59:59.000Z", "OPEN", "AFTER_MARKET", true, "2026-09-14T11:00:00.000Z"],
+    ["2026-09-14T11:00:00.000Z", "CLOSED", "CLOSED", false, "2026-09-14T23:30:00.000Z"],
+  ] as const)(
+    "applies the KRX after-market boundary at %s",
+    (instant, state, phase, orderable, nextTransitionAt) => {
+      const session = new MarketClock().current(new Date(instant));
+      expect(session.sessions.find((item) => item.id === "KRX_EQUITY")).toMatchObject({
+        state,
+        phase,
+        orderable,
+        nextTransitionAt,
+      });
+    },
+  );
+
+  it("keeps the pre-launch KRX schedule unchanged", () => {
+    const session = new MarketClock().current(new Date("2026-09-11T07:00:00.000Z"));
+    expect(session.sessions.find((item) => item.id === "KRX_EQUITY")).toMatchObject({
+      state: "AFTER_HOURS",
+      phase: "AFTER_HOURS",
+      orderable: false,
+      nextTransitionAt: "2026-09-11T09:00:00.000Z",
+    });
+    expect(session.orderableExchanges).toEqual(["NXT", "SOR"]);
+  });
+
+  it("does not let the 15:30 regular-close event suppress the KRX after-market", () => {
+    const clock = new MarketClock();
+    clock.applyBrokerStatus("AFTER_HOURS", "2026-09-14T06:30:00.000Z");
+    const session = clock.current(new Date("2026-09-14T07:00:00.000Z"));
+    expect(session.sessions.find((item) => item.id === "KRX_EQUITY")).toMatchObject({
+      state: "OPEN",
+      phase: "AFTER_MARKET",
+      orderable: true,
+    });
+    expect(session.orderableExchanges).toEqual(["KRX", "NXT", "SOR"]);
+  });
+
+  it("accepts Kiwoom's AFTER_HOURS operation status during the orderable KRX after-market", () => {
+    const clock = new MarketClock();
+    clock.applyBrokerStatus("AFTER_HOURS", "2026-09-14T07:01:00.000Z");
+    const session = clock.current(new Date("2026-09-14T07:01:01.000Z"));
+    expect(session.sessions.find((item) => item.id === "KRX_EQUITY")).toMatchObject({
+      state: "OPEN",
+      phase: "AFTER_MARKET",
+      orderable: true,
+    });
+  });
+
   it("keeps Friday's derivatives night session open after midnight Saturday", () => {
     const session = new MarketClock().current(new Date("2026-09-04T17:00:00.000Z"));
     expect(session.sessions.find((item) => item.id === "KRX_DERIVATIVES_NIGHT")).toMatchObject({

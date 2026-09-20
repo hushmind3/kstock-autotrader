@@ -14,6 +14,7 @@ import {
   type DailyBar,
   type Exchange,
   type Instrument,
+  type KospiIndexSnapshot,
   type MarketCalendarDay,
   type OrderSubmissionResult,
   type PlaceOrderRequest,
@@ -61,6 +62,53 @@ import { KisWebSocketClient } from "./websocket-client.js";
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
 const MAX_PAGES = 100;
+const KRX_AFTERMARKET_EFFECTIVE_DATE = "20260914";
+const KRX_AFTERMARKET_START_TIME = "160000";
+const KRX_AFTERMARKET_END_TIME = "200000";
+
+export interface KisCashOrderFields {
+  orderDivisionCode: "00" | "01" | "41" | "44";
+  orderPrice: string;
+  krxAftermarket: boolean;
+}
+
+/**
+ * Map the engine's simple market/limit intent onto KIS cash-order fields.
+ * KRX's separate 16:00-20:00 aftermarket has no market order. KIS documents
+ * `41` for an aftermarket limit and `44` for an aftermarket best-price limit,
+ * which is the closest supported representation of a market-order intent.
+ */
+export function kisCashOrderFields(
+  orderType: PlaceOrderRequest["orderType"],
+  limitPrice: number | undefined,
+  exchange: Exchange,
+  now = new Date(),
+): KisCashOrderFields {
+  const { date, time } = currentKisDateTime(now);
+  const krxAftermarket =
+    exchange === "KRX" &&
+    date >= KRX_AFTERMARKET_EFFECTIVE_DATE &&
+    time >= KRX_AFTERMARKET_START_TIME &&
+    time < KRX_AFTERMARKET_END_TIME;
+  if (krxAftermarket) {
+    return orderType === "market"
+      ? { orderDivisionCode: "44", orderPrice: "0", krxAftermarket }
+      : {
+          orderDivisionCode: "41",
+          orderPrice: String(limitPrice),
+          krxAftermarket,
+        };
+  }
+  return {
+    orderDivisionCode: orderType === "market" ? "01" : "00",
+    orderPrice: orderType === "market" ? "0" : String(limitPrice),
+    krxAftermarket,
+  };
+}
+
+function kisAmendCancelOrderDivision(exchange: Exchange, now = new Date()): "00" | "41" {
+  return kisCashOrderFields("limit", 1, exchange, now).krxAftermarket ? "41" : "00";
+}
 
 function records(value: unknown): JsonRecord[] {
   if (Array.isArray(value)) return asRecords(value);
@@ -297,6 +345,54 @@ export class KoreaInvestmentBrokerAdapter implements BrokerAdapter {
     return fetchKospiMaster(this.#fetch, this.#masterUrl, this.#requestTimeoutMs * 2);
   }
 
+  async fetchKospiIndex(): Promise<KospiIndexSnapshot> {
+    const result = await this.#rest.request({
+      path: KIS_PATHS.indexPrice,
+      method: "GET",
+      trId: KIS_TR_IDS.indexPrice,
+      kind: "query",
+      query: {
+        FID_COND_MRKT_DIV_CODE: "U",
+        FID_INPUT_ISCD: "0001",
+      },
+    });
+    const row = outputRecord(result.body);
+    const currentValue = Math.abs(numberValue(row.bstp_nmix_prpr, Number.NaN));
+    const rawChange = numberValue(row.bstp_nmix_prdy_vrss, Number.NaN);
+    const rawRate = numberValue(row.bstp_nmix_prdy_ctrt, Number.NaN);
+    const signCode = stringValue(row.prdy_vrss_sign);
+    if (![currentValue, rawChange, rawRate].every(Number.isFinite) || currentValue <= 0) {
+      throw new Error("KIS KOSPI index response omitted required numeric fields");
+    }
+    const direction = signCode === "4" || signCode === "5"
+      ? "DOWN"
+      : signCode === "1" || signCode === "2"
+        ? "UP"
+        : signCode === "3"
+          ? "FLAT"
+          : rawChange < 0
+            ? "DOWN"
+            : rawChange > 0
+              ? "UP"
+              : "FLAT";
+    const signed = (value: number) => direction === "DOWN"
+      ? -Math.abs(value)
+      : direction === "UP"
+        ? Math.abs(value)
+        : 0;
+    const now = new Date();
+    return {
+      indexCode: "KOSPI",
+      currentValue,
+      change: signed(rawChange),
+      changeRateBps: Math.round(signed(rawRate) * 100),
+      direction,
+      tradingDate: domainTradingDate(currentKisDateTime(now).date),
+      observedAt: now.toISOString(),
+      source: "koreainvestment",
+    };
+  }
+
   async fetchMarketCalendar(fromDate: string, requestedDays: number): Promise<MarketCalendarDay[]> {
     if (!isYyyymmdd(fromDate) || !Number.isSafeInteger(requestedDays) || requestedDays <= 0) {
       throw new BrokerRejectedError("Invalid market-calendar range", "INVALID_CALENDAR_RANGE");
@@ -470,13 +566,18 @@ export class KoreaInvestmentBrokerAdapter implements BrokerAdapter {
     if (request.orderType === "limit") {
       requirePositiveInteger(request.limitPrice ?? 0, "limitPrice");
     }
+    const orderFields = kisCashOrderFields(
+      request.orderType,
+      request.limitPrice,
+      request.exchange,
+    );
     const body: JsonRecord = {
       CANO: this.#cano,
       ACNT_PRDT_CD: this.#productCode,
       PDNO: symbol,
-      ORD_DVSN: request.orderType === "market" ? "01" : "00",
+      ORD_DVSN: orderFields.orderDivisionCode,
       ORD_QTY: String(request.quantity),
-      ORD_UNPR: request.orderType === "market" ? "0" : String(request.limitPrice),
+      ORD_UNPR: orderFields.orderPrice,
       EXCG_ID_DVSN_CD: request.exchange,
       SLL_TYPE: request.side === "sell" ? "01" : "",
       CNDT_PRIC: "",
@@ -509,7 +610,7 @@ export class KoreaInvestmentBrokerAdapter implements BrokerAdapter {
       ACNT_PRDT_CD: this.#productCode,
       KRX_FWDG_ORD_ORGNO: amendable.branchOrderNumber,
       ORGN_ODNO: decodeBrokerOrderId(amendable.brokerOrderId).orderNumber,
-      ORD_DVSN: "00",
+      ORD_DVSN: kisAmendCancelOrderDivision(request.exchange),
       RVSE_CNCL_DVSN_CD: "01",
       ORD_QTY: String(request.remainingQuantity),
       ORD_UNPR: String(request.newLimitPrice),
@@ -543,7 +644,7 @@ export class KoreaInvestmentBrokerAdapter implements BrokerAdapter {
       ACNT_PRDT_CD: this.#productCode,
       KRX_FWDG_ORD_ORGNO: amendable.branchOrderNumber,
       ORGN_ODNO: decodeBrokerOrderId(amendable.brokerOrderId).orderNumber,
-      ORD_DVSN: "00",
+      ORD_DVSN: kisAmendCancelOrderDivision(request.exchange),
       RVSE_CNCL_DVSN_CD: "02",
       ORD_QTY: String(request.remainingQuantity),
       ORD_UNPR: "0",

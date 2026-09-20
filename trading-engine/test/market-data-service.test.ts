@@ -77,6 +77,16 @@ function fakeAdapter(): BrokerAdapter {
     }),
     onEvent: () => () => {},
     fetchInstruments: async () => [instrument],
+    fetchKospiIndex: async () => ({
+      indexCode: "KOSPI",
+      currentValue: 3_300,
+      change: 10,
+      changeRateBps: 30,
+      direction: "UP",
+      tradingDate: koreanTradingDate(),
+      observedAt: new Date().toISOString(),
+      source: "kiwoom",
+    }),
     fetchDailyBars: async () => shortHistory,
     fetchQuote: async (): Promise<Quote> => ({
       symbol: instrument.symbol,

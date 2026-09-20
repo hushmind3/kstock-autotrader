@@ -217,7 +217,8 @@ export function SettingsClient() {
             </SettingsDetails>
 
             <section className="settings-card form-section">
-              <div className="form-heading"><div><p className="settings-kicker">장세 자동 판단</p><h2>장이 나쁘면 새로 사지 않고 기다립니다</h2><p className="form-description">코스피 종목 전체의 실제 확정 가격과 오늘 시세를 함께 봅니다. 약세로 판단하면 신규매수만 자동으로 쉬고, 이미 가진 종목의 매도·익절 감시는 계속합니다. 장이 회복되면 사람이 누르지 않아도 신규매수를 자동 재개합니다.</p></div><div className="toggle-row"><Toggle label="약세장 자동 매수대기" checked={payload.settings.marketRegime.enabled} onChange={(enabled) => setPayload({ ...payload, settings: { ...payload.settings, marketRegime: { ...payload.settings.marketRegime, enabled } } })} /></div></div>
+              <div className="form-heading"><div><p className="settings-kicker">장세 자동 판단</p><h2>장이 나쁘면 새로 사지 않고 기다립니다</h2><p className="form-description">코스피 종목 전체의 실제 확정 가격과 오늘 시세를 함께 봅니다. 약세로 판단하면 신규매수만 자동으로 쉬고, 이미 가진 종목의 매도·익절 감시는 계속합니다. 장이 회복되면 사람이 누르지 않아도 신규매수를 자동 재개합니다.</p></div><div className="toggle-row"><Toggle label="약세장 자동 매수대기" checked={payload.settings.marketRegime.enabled} onChange={(enabled) => setPayload({ ...payload, settings: { ...payload.settings, marketRegime: { ...payload.settings.marketRegime, enabled } } })} /><Toggle label="코스피가 파란색이면 새 매수 쉬기" checked={payload.settings.marketRegime.blockWhenKospiDown} onChange={(blockWhenKospiDown) => setPayload({ ...payload, settings: { ...payload.settings, marketRegime: { ...payload.settings.marketRegime, blockWhenKospiDown } } })} /></div></div>
+              <div className="trade-guide-note"><ShieldCheck size={15} /><span><strong>코스피가 보합(0%) 이상이면</strong> 아래 장세·종목 조건을 그대로 따릅니다. 파란색이거나 공식 지수 값을 확인하지 못하면 새 매수만 기다리고, 보유종목 매도는 항상 계속합니다.</span></div>
               <SettingsSection title="장세 판단 기준" description="아래 숫자를 모두 확인하고 직접 바꿀 수 있습니다.">
               <div className="form-grid four">
                 <NumberField label="긴 흐름을 볼 기간" value={payload.settings.marketRegime.longPeriod} onChange={(longPeriod) => setPayload({ ...payload, settings: { ...payload.settings, marketRegime: { ...payload.settings.marketRegime, longPeriod } } })} suffix="거래일" min={20} max={250} help="각 종목이 이 기간의 평균가격보다 위인지 확인합니다. 기본값은 60일입니다." />
@@ -310,10 +311,14 @@ function TradeStartGuide({ payload, dashboard }: {
           : !marketRegime.enabled
             ? "사용 안 함"
             : marketRegime.buyAllowed
-              ? "신규매수 가능"
-              : marketRegime.status === "WEAK"
-                ? "약세장으로 자동 대기"
-                : "판단 자료 확인 중";
+              ? "코스피 보합 이상 · 신규매수 가능"
+              : marketRegime.reasonCode === "KOSPI_INDEX_DOWN"
+                ? "코스피 파란색 · 새 매수 대기"
+                : marketRegime.reasonCode === "KOSPI_INDEX_NOT_READY"
+                  ? "코스피 자료 확인 중"
+                  : marketRegime.status === "WEAK"
+                    ? "약세장으로 자동 대기"
+                    : "판단 자료 확인 중";
         const checks = [
           { label: "전체 자동주문", ready: globalEngineOn, status: globalEngineOn ? "켜짐" : "꺼짐", state: globalEngineOn ? "ready" : "blocked" },
           { label: "새 종목 매수", ready: globalNewBuysAllowed, status: globalNewBuysAllowed ? "허용" : "정지", state: globalNewBuysAllowed ? "ready" : "blocked" },
@@ -343,7 +348,11 @@ function TradeStartGuide({ payload, dashboard }: {
                 : !marketOpen
                   ? "장 시작 대기"
                   : marketRegimeWaiting
-                    ? marketRegime?.status === "WEAK" ? "약세장 매수 대기" : "장세 자료 확인 중"
+                    ? marketRegime?.reasonCode === "KOSPI_INDEX_DOWN"
+                      ? "코스피 파란색 · 매수 대기"
+                      : marketRegime?.reasonCode === "KOSPI_INDEX_NOT_READY"
+                        ? "코스피 자료 확인 중"
+                        : marketRegime?.status === "WEAK" ? "약세장 매수 대기" : "장세 자료 확인 중"
                     : "주문 준비 중";
         return <article key={id} className="trade-broker-checks">
           <header><strong>{brokerNames[id]} · {broker.environment === "live" ? "실전투자" : "모의투자"}</strong><b className={ready ? "positive" : operatorStopped || connectionFailed ? "negative" : "trade-waiting"}>{summary}</b></header>

@@ -56,8 +56,16 @@ import {
 } from "./execution-cost.js";
 import { PositionLifecycle, verifiedQuoteObservedAt } from "./position-lifecycle.js";
 import { IntradayTape } from "./intraday-tape.js";
+import {
+  pairAccountExecutionsFifo,
+  type DashboardExecutionRow,
+  type DashboardExecutionTradePair,
+} from "./execution-trades.js";
 import { MarketDataService, type MarketRuntimeView } from "../services/market-data-service.js";
 import { DerivativesRuntime } from "../derivatives/runtime.js";
+
+const DASHBOARD_EXECUTION_SOURCE_LIMIT_PER_ACCOUNT = 20_000;
+const DASHBOARD_EXECUTION_TRADE_RESULT_LIMIT = 500;
 
 interface BrokerRuntime {
   adapter: BrokerAdapter;
@@ -1228,7 +1236,22 @@ export class TradingEngine {
     const since = startOfKoreanTradingDate(tradingDate);
     const positions: Array<Record<string, unknown>> = [];
     const orders: Array<Record<string, unknown>> = [];
-    const executions: Array<Record<string, unknown>> = [];
+    const executions: DashboardExecutionRow[] = [];
+    const recentExecutions: DashboardExecutionRow[] = [];
+    const executionTrades: DashboardExecutionTradePair[] = [];
+    let executionTradeSourceCount = 0;
+    let executionTradeSourceHistoryComplete = true;
+    let executionTradeAccountCount = 0;
+    let executionTradePairedAccountCount = 0;
+    let executionTradeUnavailableAccountCount = 0;
+    const instrumentNames = new Map<string, string>();
+    const instrumentName = (symbol: string): string => {
+      const cached = instrumentNames.get(symbol);
+      if (cached !== undefined) return cached;
+      const name = this.#repository.getInstrument(symbol)?.name ?? "";
+      instrumentNames.set(symbol, name);
+      return name;
+    };
     const brokerMetrics: Record<BrokerId, {
       pnl: { realized: number; unrealized: number; total: number };
       today: { orders: number; buys: number; sells: number };
@@ -1248,7 +1271,7 @@ export class TradingEngine {
           environment: scope.environment,
           accountIdMasked: masked,
           symbol: position.symbol,
-          name: position.name ?? this.#repository.getInstrument(position.symbol)?.name ?? "",
+          name: position.name ?? instrumentName(position.symbol),
           quantity: position.quantity,
           averagePrice: position.averagePrice,
           currentPrice: position.currentPrice,
@@ -1256,17 +1279,19 @@ export class TradingEngine {
           unrealizedPnlBps: position.unrealizedPnlBps,
         });
       }
-      const scopedOrders = this.#repository
-        .listOrders(scope, { limit: 20_000 })
-        .filter((order) => order.orderedAt >= since)
-        .slice(0, 500);
+      executionTradeAccountCount += 1;
+      const scopedOrderLedger = this.#repository.listOrders(scope, { limit: 20_000 });
+      const scopedOrdersForDay = scopedOrderLedger.filter((order) => order.orderedAt >= since);
+      const scopedOrders = scopedOrdersForDay.slice(0, 500);
+      const ordersById = new Map(scopedOrderLedger.map((order) => [order.id, order]));
       for (const order of scopedOrders) {
         orders.push({
           id: order.id,
           brokerId: scope.brokerId,
           environment: scope.environment,
+          brokerOrderId: order.brokerOrderId,
           symbol: order.symbol,
-          name: this.#repository.getInstrument(order.symbol)?.name ?? "",
+          name: instrumentName(order.symbol),
           side: order.side,
           orderType: order.orderType,
           quantity: order.orderedQuantity,
@@ -1274,20 +1299,61 @@ export class TradingEngine {
           limitPrice: order.limitPrice,
           status: order.status,
           exchange: order.exchange,
+          orderedAt: order.orderedAt,
           createdAt: order.createdAt,
         });
       }
-      for (const fill of this.#repository.listFills(scope, { since, limit: 500 })) {
-        executions.push({
+      const scopedFills = this.#repository.listFills(scope, {
+        limit: DASHBOARD_EXECUTION_SOURCE_LIMIT_PER_ACCOUNT,
+      });
+      executionTradeSourceCount += scopedFills.length;
+      const sourceHistoryComplete =
+        scopedFills.length < DASHBOARD_EXECUTION_SOURCE_LIMIT_PER_ACCOUNT;
+      if (!sourceHistoryComplete) {
+        // The repository caps this read. Be conservative: a full page may have
+        // older inventory changes outside the supplied FIFO range, so never
+        // emit potentially false matches for this account.
+        executionTradeSourceHistoryComplete = false;
+        executionTradeUnavailableAccountCount += 1;
+      } else {
+        executionTradePairedAccountCount += 1;
+      }
+      const scopedRows = sourceHistoryComplete ? scopedFills : scopedFills.slice(0, 500);
+      const scopedPairingRows = scopedRows.map((fill, fillIndex) => {
+        // Both ledgers are read in one bounded query. A missing old order is
+        // represented with an unknown venue instead of doing up to 20k extra
+        // SQLite lookups on every five-second dashboard poll.
+        const order = ordersById.get(fill.orderId);
+        const grossAmount = fill.quantity * fill.price;
+        const execution: DashboardExecutionRow = {
           id: fill.id,
           brokerId: scope.brokerId,
+          environment: scope.environment,
+          accountIdMasked: masked,
+          brokerExecutionId: fill.brokerExecutionId,
+          brokerOrderId: fill.brokerOrderId,
           symbol: fill.symbol,
-          name: this.#repository.getInstrument(fill.symbol)?.name ?? "",
+          name: instrumentName(fill.symbol),
           side: fill.side,
           quantity: fill.quantity,
           price: fill.price,
+          grossAmount: Number.isSafeInteger(grossAmount) ? grossAmount : null,
+          fee: fill.fee,
+          tax: fill.tax,
+          exchange: order?.exchange ?? null,
+          // The equity fill ledger has no broker-authoritative per-fill realized P&L.
+          // Keep the absence explicit instead of deriving a possibly misleading value.
+          realizedPnl: null,
           executedAt: fill.executedAt,
-        });
+        };
+        if (fillIndex < 500) {
+          recentExecutions.push(execution);
+          if (fill.executedAt >= since) executions.push(execution);
+        }
+        return { execution, receivedAt: fill.receivedAt };
+      });
+      if (sourceHistoryComplete) {
+        executionTrades.push(...pairAccountExecutionsFifo(scopedPairingRows));
       }
       const pnl = this.#repository.getDailyPnl(scope, tradingDate);
       const brokerRealized = pnl?.realizedPnl ?? 0;
@@ -1308,8 +1374,19 @@ export class TradingEngine {
       unrealized += brokerUnrealized;
     }
 
-    orders.sort((left, right) => String(right.createdAt).localeCompare(String(left.createdAt)));
-    executions.sort((left, right) => String(right.executedAt).localeCompare(String(left.executedAt)));
+    orders.sort((left, right) =>
+      String(right.orderedAt).localeCompare(String(left.orderedAt))
+      || String(right.id).localeCompare(String(left.id)),
+    );
+    executions.sort((left, right) =>
+      right.executedAt.localeCompare(left.executedAt)
+      || right.id.localeCompare(left.id),
+    );
+    executionTrades.sort((left, right) =>
+      right.activityAt.localeCompare(left.activityAt)
+      || right.id.localeCompare(left.id),
+    );
+    const returnedExecutionTrades = executionTrades.slice(0, DASHBOARD_EXECUTION_TRADE_RESULT_LIMIT);
     const errors = this.#repository.listErrors({ since, limit: 100 }).map((row) => this.errorRow(row));
     const brokerRows = await Promise.all(BROKER_IDS.map((brokerId) => this.brokerDashboard(brokerId)));
     const candidates = [...this.#candidates.values()]
@@ -1364,6 +1441,23 @@ export class TradingEngine {
       positions,
       orders,
       executions,
+      recentExecutions: recentExecutions
+        .sort((left, right) =>
+          right.executedAt.localeCompare(left.executedAt)
+          || right.id.localeCompare(left.id),
+        )
+        .slice(0, 500),
+      executionTrades: returnedExecutionTrades,
+      executionTradeCoverage: {
+        activeAccountCount: executionTradeAccountCount,
+        pairedAccountCount: executionTradePairedAccountCount,
+        unavailableAccountCount: executionTradeUnavailableAccountCount,
+        sourceExecutionCount: executionTradeSourceCount,
+        sourceLimitPerAccount: DASHBOARD_EXECUTION_SOURCE_LIMIT_PER_ACCOUNT,
+        sourceHistoryComplete: executionTradeSourceHistoryComplete,
+        totalPairCount: executionTrades.length,
+        returnedPairCount: returnedExecutionTrades.length,
+      },
       errors,
     };
   }

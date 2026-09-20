@@ -15,6 +15,8 @@ import {
   isBrokerAutomationArmed,
   isBrokerNewBuyPaused,
   intradayReadinessText,
+  marketRegimeDescription,
+  marketRegimeTitle,
 } from "../components/dashboard-client";
 import type { BrokerDashboard, DashboardResponse } from "../lib/api-types";
 
@@ -97,6 +99,16 @@ function dashboard(
         dailyAboveLongMaBps: 5_200,
         intradaySampleCount: 300,
         intradayAdvancingBps: 5_100,
+        kospiIndex: {
+          indexCode: "KOSPI",
+          currentValue: 3_407.31,
+          change: 10.25,
+          changeRateBps: 30,
+          direction: "UP",
+          tradingDate: "2026-09-03",
+          observedAt: "2026-09-03T00:00:00.000Z",
+          source: "kiwoom",
+        },
         checkedAt: "2026-09-03T00:00:00.000Z",
       },
     },
@@ -213,6 +225,64 @@ describe("대시보드 자동매매 상태", () => {
     expect(brokerOrderReadiness(data, broker())).toBe(
       "자동매도 감시 중 · 신규매수 약세장 대기",
     );
+  });
+
+  it("코스피가 파란색이면 신규매수만 대기하고 공식 지수 값을 설명한다", () => {
+    const data = dashboard("OPEN");
+    data.market.regime = {
+      ...data.market.regime,
+      status: "WEAK",
+      buyAllowed: false,
+      reasonCode: "KOSPI_INDEX_DOWN",
+      kospiIndex: {
+        ...data.market.regime.kospiIndex!,
+        currentValue: 3_350.1,
+        change: -47.2,
+        changeRateBps: -139,
+        direction: "DOWN",
+        source: "koreainvestment",
+      },
+    };
+
+    expect(marketRegimeTitle(data)).toBe("코스피 파란색 · 신규매수 자동 대기");
+    expect(marketRegimeDescription(data)).toContain("한국투자증권 공식 코스피");
+    expect(marketRegimeDescription(data)).toContain("-1.39%");
+    expect(marketRegimeDescription(data)).toContain("새 종목 매수만 쉽니다");
+    expect(brokerOrderReadiness(data, broker())).toBe(
+      "자동매도 감시 중 · 코스피 파란색이라 신규매수 대기",
+    );
+  });
+
+  it("코스피 공식 값이 없거나 오래되면 추측하지 않고 신규매수를 기다린다", () => {
+    const data = dashboard("OPEN");
+    data.market.regime = {
+      ...data.market.regime,
+      status: "WAITING_FOR_DATA",
+      buyAllowed: false,
+      reasonCode: "KOSPI_INDEX_NOT_READY",
+      kospiIndex: null,
+    };
+
+    expect(marketRegimeTitle(data)).toBe("코스피 자료 확인 중 · 신규매수 대기");
+    expect(marketRegimeDescription(data)).toContain("최근 값인지 확인");
+    expect(brokerOrderReadiness(data, broker())).toBe(
+      "자동매도 감시 중 · 코스피 자료 확인 중",
+    );
+  });
+
+  it("코스피가 보합 이상이고 다른 장세 조건도 통과하면 신규매수 가능으로 표시한다", () => {
+    const data = dashboard("OPEN");
+    data.market.regime.kospiIndex = {
+      ...data.market.regime.kospiIndex!,
+      change: 0,
+      changeRateBps: 0,
+      direction: "FLAT",
+    };
+
+    expect(marketRegimeTitle(data)).toBe("코스피 보합 이상 · 신규매수 가능");
+    expect(marketRegimeDescription(data)).toContain("0.00%");
+    expect(marketRegimeDescription(data)).toContain("보합 이상");
+    expect(brokerOrderReadiness(data, broker())).toBe("현재 주문 가능 · 조건 감시 중");
   });
 
   it("KRX 거래 시간에는 증권사 확인 여부를 그대로 표시한다", () => {

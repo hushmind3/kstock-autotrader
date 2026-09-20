@@ -15,6 +15,7 @@ import {
   type DailyBar,
   type Exchange,
   type Instrument,
+  type KospiIndexSnapshot,
   type OrderSubmissionResult,
   type PlaceOrderRequest,
   type Quote,
@@ -74,6 +75,48 @@ const DEFAULT_LIVE_QUERY_REQUESTS_PER_SECOND = 4;
 const MAX_REALTIME_SYMBOLS = 200;
 const DEFAULT_QUOTE_BATCH_SIZE = 1;
 const MAX_PAGES = 1_000;
+const KRX_AFTERMARKET_EFFECTIVE_DATE = "20260914";
+const KRX_AFTERMARKET_START_TIME = "160000";
+const KRX_AFTERMARKET_END_TIME = "200000";
+
+export interface KiwoomCashOrderFields {
+  tradeType: "0" | "3" | "6";
+  orderPrice: string;
+  krxAftermarket: boolean;
+}
+
+/**
+ * Resolve the Kiwoom order fields for the selected route and Korean exchange
+ * clock. From 2026-09-14, KRX runs a separate aftermarket from 16:00 to 20:00.
+ * It has no market order, so a `market` intent is represented by Kiwoom's
+ * best-price limit order (`trde_tp=6`). A true limit order keeps the documented
+ * normal limit code (`trde_tp=0`).
+ *
+ * Kiwoom official sources:
+ * - REST notice 60, "KRX 애프터마켓 신설 ... 오픈API 서비스 이용안내"
+ * - kt10000 API guide (`trde_tp`: 0 normal, 3 market, 6 best-price limit)
+ */
+export function kiwoomCashOrderFields(
+  orderType: PlaceOrderRequest["orderType"],
+  limitPrice: number | undefined,
+  exchange: Exchange,
+  now = new Date(),
+): KiwoomCashOrderFields {
+  const { date, time } = kstNowParts(now);
+  const krxAftermarket =
+    exchange === "KRX" &&
+    date >= KRX_AFTERMARKET_EFFECTIVE_DATE &&
+    time >= KRX_AFTERMARKET_START_TIME &&
+    time < KRX_AFTERMARKET_END_TIME;
+  if (krxAftermarket && orderType === "market") {
+    return { tradeType: "6", orderPrice: "", krxAftermarket };
+  }
+  return {
+    tradeType: orderType === "market" ? "3" : "0",
+    orderPrice: orderType === "market" ? "" : String(limitPrice),
+    krxAftermarket,
+  };
+}
 
 /**
  * kt00009 reports an empty order-history result as a rejected response instead
@@ -84,6 +127,86 @@ const MAX_PAGES = 1_000;
 function isEmptyHistoricalOrderResponse(error: unknown): boolean {
   return error instanceof BrokerRejectedError &&
     /(?:^|\()501724\s*:\s*관련자료가없습니다(?:\)|$)/.test(error.message);
+}
+
+type KospiDirection = KospiIndexSnapshot["direction"];
+
+interface ParsedKospiIndexFields {
+  currentValue: number;
+  change: number;
+  changeRateBps: number;
+  direction: KospiDirection;
+}
+
+/**
+ * ka20001 normally exposes the current index in its root summary, but Kiwoom
+ * can leave `pred_pre` blank while explicitly reporting a flat market
+ * (`pred_pre_sig=3`, `flu_rt=0.00`). The same official fields are also present
+ * in `inds_cur_prc_tm` with an `_n` suffix. Parse one field set atomically so
+ * values from different observations are never mixed.
+ */
+function parseKospiIndexFields(
+  record: UnknownRecord,
+  suffix: "" | "_n",
+): ParsedKospiIndexFields | undefined {
+  const parsedCurrent = brokerNumber(record[`cur_prc${suffix}`]);
+  const rawChange = brokerNumber(record[`pred_pre${suffix}`]);
+  const rawRate = brokerNumber(record[`flu_rt${suffix}`]);
+  const signCode = stringAt(record, `pred_pre_sig${suffix}`);
+  const currentValue = parsedCurrent === undefined ? undefined : Math.abs(parsedCurrent);
+
+  if (currentValue === undefined || !(currentValue > 0) || rawRate === undefined) {
+    return undefined;
+  }
+
+  let direction: KospiDirection | undefined;
+  if (signCode === "4" || signCode === "5") {
+    direction = "DOWN";
+  } else if (signCode === "1" || signCode === "2") {
+    direction = "UP";
+  } else if (signCode === "3") {
+    direction = "FLAT";
+  } else if (rawChange !== undefined && rawChange !== 0) {
+    direction = rawChange < 0 ? "DOWN" : "UP";
+  } else if (rawRate !== 0) {
+    direction = rawRate < 0 ? "DOWN" : "UP";
+  } else if (rawChange === 0) {
+    direction = "FLAT";
+  }
+
+  if (direction === undefined) return undefined;
+
+  // A blank change is only unambiguous when Kiwoom itself says the index is
+  // flat and publishes a zero change rate. Never derive a non-zero point
+  // change from the percentage or current value.
+  const change = rawChange ?? (direction === "FLAT" && rawRate === 0 ? 0 : undefined);
+  if (change === undefined) return undefined;
+  if (direction === "FLAT" && (change !== 0 || rawRate !== 0)) return undefined;
+
+  const signed = (value: number) => direction === "DOWN"
+    ? -Math.abs(value)
+    : direction === "UP"
+      ? Math.abs(value)
+      : 0;
+  return {
+    currentValue,
+    change: signed(change),
+    changeRateBps: Math.round(signed(rawRate) * 100),
+    direction,
+  };
+}
+
+function newestKospiTimeRows(body: UnknownRecord): UnknownRecord[] {
+  return recordsAt(body, "inds_cur_prc_tm")
+    .map((record, index) => ({
+      record,
+      index,
+      time: /^\d{4,6}$/.test(stringAt(record, "tm_n") ?? "")
+        ? Number(stringAt(record, "tm_n"))
+        : -1,
+    }))
+    .sort((left, right) => right.time - left.time || left.index - right.index)
+    .map(({ record }) => record);
 }
 
 export interface KiwoomBrokerAdapterOptions extends BrokerAdapterOptions {
@@ -276,6 +399,34 @@ export class KiwoomBrokerAdapter implements BrokerAdapter {
     return ensureUniqueBy(parsed.instruments, (instrument) => instrument.symbol);
   }
 
+  async fetchKospiIndex(): Promise<KospiIndexSnapshot> {
+    const result = await this.http.post({
+      apiId: "ka20001",
+      path: "/api/dostk/sect",
+      kind: "query",
+      body: { mrkt_tp: "0", inds_cd: "001" },
+    });
+    const parsed = parseKospiIndexFields(result.body, "") ??
+      newestKospiTimeRows(result.body)
+        .map((record) => parseKospiIndexFields(record, "_n"))
+        .find((value): value is ParsedKospiIndexFields => value !== undefined);
+    if (parsed === undefined) {
+      throw new KiwoomProtocolError(
+        "Kiwoom returned no complete KOSPI index observation.",
+        "MALFORMED_KOSPI_INDEX",
+      );
+    }
+    const now = new Date();
+    const { date } = kstNowParts(now);
+    return {
+      indexCode: "KOSPI",
+      ...parsed,
+      tradingDate: `${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6, 8)}`,
+      observedAt: now.toISOString(),
+      source: "kiwoom",
+    };
+  }
+
   async fetchDailyBars(symbol: string, requiredCount: number): Promise<DailyBar[]> {
     const normalizedSymbol = assertSymbol(symbol);
     if (!Number.isSafeInteger(requiredCount) || requiredCount <= 0) {
@@ -346,14 +497,19 @@ export class KiwoomBrokerAdapter implements BrokerAdapter {
   async placeOrder(request: PlaceOrderRequest): Promise<OrderSubmissionResult> {
     validatePlaceOrder(request, this.options.environment);
     const symbol = assertSymbol(request.symbol);
+    const orderFields = kiwoomCashOrderFields(
+      request.orderType,
+      request.limitPrice,
+      request.exchange,
+    );
     return this.submitOnce(request.clientOrderId, async () => {
       const apiId = request.side === "buy" ? "kt10000" : "kt10001";
       return this.submitOrder(apiId, {
         dmst_stex_tp: request.exchange,
         stk_cd: symbol,
         ord_qty: String(request.quantity),
-        trde_tp: request.orderType === "market" ? "3" : "0",
-        ord_uv: request.orderType === "market" ? "" : String(request.limitPrice),
+        trde_tp: orderFields.tradeType,
+        ord_uv: orderFields.orderPrice,
         cond_uv: "",
       });
     });
