@@ -5,6 +5,7 @@ import Link from "next/link";
 import { AlertTriangle, Check, Clock3, KeyRound, Link2, Save, ShieldCheck, Trash2 } from "lucide-react";
 import { getJson, koreanErrorMessage } from "@/lib/client-api";
 import { plainTradingRuleSummary, tradingRuleSummary } from "../lib/trading-rule-summary";
+import { DerivativesSettingsPanel } from "./derivatives-settings-client";
 import {
   autoTradingPresetStrategyId,
   dailyBuyBudgetMultiple,
@@ -23,17 +24,18 @@ import type {
 } from "@/lib/api-types";
 
 const brokerNames: Record<BrokerId, string> = { kiwoom: "키움증권", koreainvestment: "한국투자증권" };
-type SettingsTab = BrokerId | "common";
+type SettingsTab = BrokerId | "common" | "derivatives";
 
 const settingsTabs: Array<{ id: SettingsTab; label: string }> = [
   { id: "kiwoom", label: "키움 현물" },
   { id: "koreainvestment", label: "한투 현물" },
+  { id: "derivatives", label: "선물·옵션" },
   { id: "common", label: "공통 안전" },
 ];
 
 export function settingsTabFromSearch(search: string): SettingsTab {
   const requested = new URLSearchParams(search).get("tab");
-  return requested === "common" || requested === "koreainvestment" || requested === "kiwoom"
+  return requested === "common" || requested === "koreainvestment" || requested === "kiwoom" || requested === "derivatives"
     ? requested
     : "kiwoom";
 }
@@ -203,7 +205,10 @@ export function SettingsClient() {
             >{tab.label}</button>)}
           </nav>
 
-          {activeTab === "common" ? <section id="settings-panel-common" className="settings-tab-panel" role="tabpanel" aria-labelledby="settings-tab-common" tabIndex={0}>
+          {activeTab === "derivatives" ? <section id="settings-panel-derivatives" className="settings-tab-panel derivatives-settings-embedded" role="tabpanel" aria-labelledby="settings-tab-derivatives" tabIndex={0}>
+            <div className="settings-embedded-intro"><p className="settings-kicker">선물·옵션</p><h2>현물 자동매매 설정 안에서 함께 관리</h2><p>선물·옵션 계좌와 운용 방식은 현물 계좌와 분리해 관리합니다. 아래에서 전략·위험 한도·계좌 연결을 저장하면 됩니다. 기존 선물 설정 주소로 들어와도 이 탭으로 자동 이동합니다.</p></div>
+            <DerivativesSettingsPanel embedded />
+          </section> : activeTab === "common" ? <section id="settings-panel-common" className="settings-tab-panel" role="tabpanel" aria-labelledby="settings-tab-common" tabIndex={0}>
             <section className="settings-card safety-card">
               <div className="safety-copy"><p className="settings-kicker">주문 안전장치</p><h2>모든 계좌에 적용되는 안전 설정</h2><span>전체 정지는 직접 해제하기 전까지 그대로 유지됩니다.</span></div>
               <div className="safety-controls">
@@ -464,7 +469,7 @@ function CredentialCard({ id, environment, status, connection, market, reload }:
     <div className="credential-title"><KeyRound size={17} /><div><h2>{brokerNames[id]}</h2><p>{isKis ? "현물 " : ""}{environment === "live" ? "실전투자" : "모의투자"} 계좌 연결</p></div><span className={status.configured ? "configured" : "missing"}>{status.configured ? "저장됨" : "미설정"}</span></div>
     <dl><div><dt>API 정보 보관 위치</dt><dd>{storageName}</dd></div><div><dt>계좌번호</dt><dd>{status.maskedAccountId ?? "—"}</dd></div></dl>
     {environment === "live" ? <div className="credential-warning"><AlertTriangle size={15} /><span>실전투자 계좌입니다. API 키를 저장해도 자동주문과 신규매수는 자동으로 켜지지 않습니다.</span></div> : null}
-    {isKis ? <div className="trade-guide-note"><ShieldCheck size={15} /><span>선물·옵션 계좌는 현물 계좌와 따로 등록합니다. 같은 API 정보를 재사용할 수 있습니다. <Link href="/derivatives/settings">선물·옵션 계좌 연결</Link></span></div> : null}
+    {isKis ? <div className="trade-guide-note"><ShieldCheck size={15} /><span>선물·옵션 계좌는 현물 계좌와 따로 등록합니다. 같은 API 정보를 재사용할 수 있습니다. <Link href="/settings?tab=derivatives">선물·옵션 계좌 연결</Link></span></div> : null}
     {status.configured && connection ? <CredentialConnectionStatus connection={connection} market={market} /> : null}
     {status.configured && !connection ? <div className="credential-feedback waiting" role="status"><Clock3 size={15} /><span>계좌 환경 변경을 저장하면 해당 환경의 연결 상태를 확인합니다.</span></div> : null}
     {environmentManaged ? <div className="credential-managed"><ShieldCheck size={15} /><span>이 API 키는 서버 환경설정에서 관리됩니다. 이 화면에서는 바꿀 수 없습니다.</span></div> : status.configured && !editingCredentials ? <div className="credential-collapsed-actions">

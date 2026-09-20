@@ -13,8 +13,8 @@ import {
   ShieldCheck,
   Trash2,
 } from "lucide-react";
-import { DerivativesAutomationSettingsCard } from "@/components/derivatives-automation-settings-card";
-import { formatDateTime, getJson } from "@/lib/client-api";
+import { DerivativesAutomationSettingsCard } from "./derivatives-automation-settings-card";
+import { formatDateTime, getJson } from "../lib/client-api";
 import type {
   DashboardResponse,
   DerivativesCredentialConnectionState,
@@ -22,7 +22,7 @@ import type {
   MarketSessionState,
   MarketVenueSession,
   SettingsResponse,
-} from "@/lib/api-types";
+} from "../lib/api-types";
 
 type DerivativesBrokerTab = "kiwoom" | "koreainvestment";
 type TradingEnvironment = "live" | "paper";
@@ -83,7 +83,7 @@ const sessionDefinitions = [
 const emptyDerivativeStatuses: DerivativesStatusByEnvironment = { live: null, paper: null };
 const emptyDerivativeErrors: DerivativesErrorsByEnvironment = { live: false, paper: false };
 
-export function DerivativesSettingsClient() {
+export function DerivativesSettingsPanel({ embedded = false }: { embedded?: boolean } = {}) {
   const [brokerTab, setBrokerTab] = useState<DerivativesBrokerTab>("koreainvestment");
   const [dashboard, setDashboard] = useState<DashboardResponse | null>(null);
   const [cashSettings, setCashSettings] = useState<SettingsResponse | null>(null);
@@ -144,8 +144,8 @@ export function DerivativesSettingsClient() {
     selectBrokerTab(next);
   };
 
-  return <main className="shell">
-    <header className="page-header"><div><p className="eyebrow">선물·옵션 자동매매 설정</p><h1>선물·옵션 자동매매 설정</h1><p className="subtitle">계좌 연결과 운용 방식을 설정합니다.</p></div><button className="icon-button" onClick={() => void load()} aria-label="새로고침"><RefreshCw size={16} /></button></header>
+  return <>
+    {!embedded ? <header className="page-header"><div><p className="eyebrow">선물·옵션 자동매매 설정</p><h1>선물·옵션 자동매매 설정</h1><p className="subtitle">계좌 연결과 운용 방식을 설정합니다.</p></div><button className="icon-button" onClick={() => void load()} aria-label="새로고침"><RefreshCw size={16} /></button></header> : null}
     {dashboardError ? <section className="notice danger"><AlertCircle size={17} /><div><strong>시장 시간표를 불러오지 못했습니다</strong><p>잠시 후 자동으로 다시 확인합니다. 지금 다시 시도하려면 새로고침을 눌러 주세요.</p></div></section> : null}
     <DerivativesAutomationSettingsCard />
     <section className="derivatives-session-grid" aria-label="선물 옵션 시장 시간">
@@ -165,6 +165,12 @@ export function DerivativesSettingsClient() {
         reload={load}
       /> : <KiwoomUnavailableCard />}
     </section>
+  </>;
+}
+
+export function DerivativesSettingsClient() {
+  return <main className="shell">
+    <DerivativesSettingsPanel />
   </main>;
 }
 

@@ -8,11 +8,13 @@ import type { ReactNode } from "react";
 const navigation = [
   { href: "/", label: "현물 자동매매", mobileLabel: "현물", icon: LayoutDashboard },
   { href: "/derivatives", label: "선물·옵션 자동매매", mobileLabel: "선물", icon: TrendingUp },
-  { href: "/derivatives/settings", label: "선물·옵션 자동매매 설정", mobileLabel: "선물설정", icon: Settings },
+  // Keep the legacy route in active-path resolution while the page itself redirects
+  // into the unified settings screen. It is intentionally not rendered as a menu item.
+  { href: "/derivatives/settings", label: "선물·옵션 자동매매 설정", mobileLabel: "선물설정", icon: Settings, legacy: true },
   { href: "/orders", label: "현물 주문·체결", mobileLabel: "주문", icon: ClipboardList },
   { href: "/positions", label: "현물 보유종목", mobileLabel: "보유", icon: WalletCards },
   { href: "/errors", label: "시스템 기록", mobileLabel: "기록", icon: AlertTriangle },
-  { href: "/settings", label: "현물 자동매매 설정", mobileLabel: "설정", icon: Settings },
+  { href: "/settings", label: "자동매매 설정", mobileLabel: "설정", icon: Settings },
 ];
 
 export function activeNavigationHref(pathname: string): string | null {
@@ -32,7 +34,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           <span><strong>K-STOCK</strong><small>한국주식 자동매매</small></span>
         </Link>
         <nav aria-label="주요 메뉴">
-          {navigation.map(({ href, label, mobileLabel, icon: Icon }) => {
+          {navigation.filter((item) => !item.legacy).map(({ href, label, mobileLabel, icon: Icon }) => {
             const active = activeHref === href;
             return <Link key={href} aria-label={label} aria-current={active ? "page" : undefined} title={label} className={active ? "active" : ""} href={href}><Icon size={17} /><span>{label}</span><small>{mobileLabel}</small></Link>;
           })}

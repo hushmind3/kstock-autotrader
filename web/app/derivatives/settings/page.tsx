@@ -1,6 +1,5 @@
-import { AppShell } from "@/components/app-shell";
-import { DerivativesSettingsClient } from "@/components/derivatives-settings-client";
+import { redirect } from "next/navigation";
 
 export default function DerivativesSettingsPage() {
-  return <AppShell><DerivativesSettingsClient /></AppShell>;
+  redirect("/settings?tab=derivatives");
 }

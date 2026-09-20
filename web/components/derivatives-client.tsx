@@ -198,7 +198,7 @@ export function DerivativesClient() {
       <div className="header-actions">
         <span className={`engine-state ${armed ? "state-running" : "state-halted"}`}><i />{armed ? "실제 주문 켜짐" : "실제 주문 꺼짐"}</span>
         <button className="icon-button" disabled={busy !== null} onClick={() => void load()} aria-label="새로고침"><RefreshCw size={16} /></button>
-        <Link className="derivatives-settings-link" href="/derivatives/settings"><Settings size={15} />운용 설정</Link>
+        <Link className="derivatives-settings-link" href="/settings?tab=derivatives"><Settings size={15} />운용 설정</Link>
       </div>
     </header>
 
@@ -215,7 +215,7 @@ export function DerivativesClient() {
           ? "설정한 조건과 모든 안전 확인을 통과하면 별도 클릭 없이 실제 주문이 나갑니다."
           : "운용 설정을 저장한 뒤 아래 ‘자동운용 시작’을 직접 눌러야 실제 주문이 가능해집니다."}</p>
       </div>
-      <Link href="/derivatives/settings">설정 확인</Link>
+      <Link href="/settings?tab=derivatives">설정 확인</Link>
     </section>
 
     <section className="derivatives-control-card">
