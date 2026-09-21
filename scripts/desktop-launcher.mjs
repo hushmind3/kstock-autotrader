@@ -2,6 +2,7 @@ import { execFile, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, existsSync, openSync } from "node:fs";
 import { link, mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
+import { request as httpRequest } from "node:http";
 import { createRequire } from "node:module";
 import path from "node:path";
 import process from "node:process";
@@ -102,12 +103,47 @@ async function processLooksOwned(pid, service, instanceId) {
 async function terminateOwnedProcess(pid, service, instanceId) {
   if (!await processLooksOwned(pid, service, instanceId)) return false;
   process.kill(pid, "SIGTERM");
-  const deadline = Date.now() + 5_000;
+  // Engine shutdown closes broker sockets and persists buffered market data
+  // before releasing the database lease. Five seconds was too short during
+  // market hours, so the launcher could SIGKILL a healthy shutdown and leave
+  // the 30-second lease behind. Give it enough time to stop cleanly.
+  const deadline = Date.now() + (service === "engine" ? 40_000 : 10_000);
   while (Date.now() < deadline && isProcessRunning(pid)) await delay(100);
   if (isProcessRunning(pid) && await processLooksOwned(pid, service, instanceId)) {
     process.kill(pid, "SIGKILL");
   }
   return true;
+}
+
+function localJsonRequest(url, options = {}) {
+  const timeoutMs = options.timeoutMs ?? 5_000;
+  const headers = { ...options.headers, connection: "close" };
+  return new Promise((resolve, reject) => {
+    const request = httpRequest(url, { method: "GET", headers, agent: false }, (response) => {
+      const chunks = [];
+      let size = 0;
+      response.on("data", (chunk) => {
+        size += chunk.length;
+        if (size > 2 * 1024 * 1024) {
+          request.destroy(new Error("Local health response exceeded 2 MiB"));
+          return;
+        }
+        chunks.push(chunk);
+      });
+      response.once("end", () => {
+        try {
+          const payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+          resolve({ ok: response.statusCode >= 200 && response.statusCode < 300, payload });
+        } catch (error) {
+          reject(error);
+        }
+      });
+      response.once("error", reject);
+    });
+    request.setTimeout(timeoutMs, () => request.destroy(new Error(`Local request timed out after ${timeoutMs}ms`)));
+    request.once("error", reject);
+    request.end();
+  });
 }
 
 async function readJson(filename, fallback = null) {
@@ -231,9 +267,12 @@ async function runBuild(logFd) {
 
 async function serviceHealth(url, expectedService, instanceId, fingerprint) {
   try {
-    const response = await fetch(url, { signal: AbortSignal.timeout(1_500), cache: "no-store" });
+    // Do not reuse pooled fetch sockets for watchdog probes. One half-closed
+    // keep-alive connection previously caused every later probe to queue
+    // behind it, making the launcher kill an otherwise responsive engine.
+    const response = await localJsonRequest(url);
     if (!response.ok) return false;
-    const payload = await response.json();
+    const payload = response.payload;
     return payload?.ok === true && payload?.service === expectedService && payload?.instanceId === instanceId && payload?.buildFingerprint === fingerprint;
   } catch {
     return false;
@@ -255,10 +294,8 @@ async function engineHealthy(instanceId, fingerprint) {
   const token = await adminToken();
   if (!token) return false;
   try {
-    const response = await fetch(`${engineUrl}/api/settings`, {
+    const response = await localJsonRequest(`${engineUrl}/api/settings`, {
       headers: { "x-kstock-admin-token": token },
-      signal: AbortSignal.timeout(1_500),
-      cache: "no-store",
     });
     return response.ok;
   } catch {
